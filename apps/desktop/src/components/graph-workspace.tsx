@@ -1,25 +1,14 @@
-import { useCallback, useEffect, useState } from 'react'
-import { getAppVersion, isAppError, notePath, readNote, writeNote, type GraphInfo } from '@reflect/core'
+import { useCallback, useEffect, useState, type ReactElement } from 'react'
+import { getAppVersion, type GraphInfo } from '@reflect/core'
 import { AppShell } from '@/components/app-shell'
+import { DailyStream } from '@/components/daily-stream'
 import { NotePane } from '@/components/note-pane'
+import { isIsoDate, todayIso } from '@/lib/dates'
+import { useGraph } from '@/providers/graph-provider'
 import { useTheme } from '@/providers/theme-provider'
-
-/** The fixed note the workspace opens until Plan 06 brings navigation. */
-const WELCOME_PATH = notePath('welcome')
-
-/** Seed content, written once when the welcome note doesn't exist yet. */
-const WELCOME_NOTE = `# Welcome to Reflect
-
-This is the **meowdown** editor — markdown you can _see_, backed by plain files.
-Everything you type here is saved to \`${WELCOME_PATH}\` in your graph.
-
-Daily notes link to people and ideas with [[Wiki Links]], and to dates like [[2026-06-09]].
-
-- capture first
-- organize later
-
-> Backlinks are the organizing primitive.
-`
+import { useAppShortcuts } from '@/routing/app-shortcuts'
+import { RouterProvider, useRouter } from '@/routing/router'
+import { ScrollRestored } from '@/routing/scroll-restore'
 
 const CLOUD_LABELS: Record<string, string> = {
   icloud: 'iCloud Drive',
@@ -33,17 +22,24 @@ interface GraphWorkspaceProps {
 }
 
 /**
- * The main surface once a graph is open: the three-region shell with a header
- * (graph name, a cloud-sync warning when relevant, version, theme toggle) and
- * the editor. Daily-note wiring + persistence land in Plan 06.
+ * The main surface once a graph is open: the shell + header around the
+ * route-driven content (Plan 06). The app opens to today's daily note — the
+ * chronological spine — and all navigation goes through the typed router.
+ * Keyed by the graph root so switching graphs starts a fresh history.
  */
-export function GraphWorkspace({ graph }: GraphWorkspaceProps) {
+export function GraphWorkspace({ graph }: GraphWorkspaceProps): ReactElement {
+  return (
+    <RouterProvider key={graph.root}>
+      <WorkspaceContent graph={graph} />
+    </RouterProvider>
+  )
+}
+
+function WorkspaceContent({ graph }: GraphWorkspaceProps): ReactElement {
   const { resolvedTheme, setTheme } = useTheme()
+  const { indexing } = useGraph()
   const [version, setVersion] = useState<string | null>(null)
-  // Set once the welcome note is known to exist (created on first open), so the
-  // editor only ever binds to a real file. Keyed off the graph root: switching
-  // graphs re-ensures in the new one.
-  const [openPath, setOpenPath] = useState<string | null>(null)
+  useAppShortcuts()
 
   useEffect(() => {
     let active = true
@@ -63,34 +59,6 @@ export function GraphWorkspace({ graph }: GraphWorkspaceProps) {
       active = false
     }
   }, [])
-
-  useEffect(() => {
-    let active = true
-    setOpenPath(null)
-    void (async () => {
-      try {
-        await readNote(WELCOME_PATH)
-      } catch (err) {
-        if (isAppError(err) && err.kind === 'notFound') {
-          try {
-            await writeNote(WELCOME_PATH, WELCOME_NOTE, graph.generation)
-          } catch {
-            // fall through — NotePane surfaces the open error
-          }
-        }
-        // Any other failure also falls through: always mount NotePane so its
-        // own read attempt can show the real error instead of an endless
-        // "Opening note…".
-      } finally {
-        if (active) {
-          setOpenPath(WELCOME_PATH)
-        }
-      }
-    })()
-    return () => {
-      active = false
-    }
-  }, [graph.root, graph.generation])
 
   const toggleTheme = useCallback((): void => {
     setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')
@@ -113,6 +81,14 @@ export function GraphWorkspace({ graph }: GraphWorkspaceProps) {
             {graph.name}
           </h1>
           <div className="flex items-center gap-3">
+            {indexing ? (
+              <span
+                role="status"
+                className="text-xs text-[color:var(--text-muted)] motion-safe:animate-pulse"
+              >
+                Indexing…
+              </span>
+            ) : null}
             <span className="text-xs text-[color:var(--text-muted)]">v{version ?? '—'}</span>
             <button
               type="button"
@@ -132,14 +108,37 @@ export function GraphWorkspace({ graph }: GraphWorkspaceProps) {
           </div>
         ) : null}
 
-        <div className="mx-auto w-full max-w-2xl flex-1 overflow-auto px-6 py-8">
-          {openPath ? (
-            <NotePane path={openPath} />
-          ) : (
-            <div className="text-sm text-[color:var(--text-muted)]">Opening note…</div>
-          )}
+        <div className="min-h-0 flex-1">
+          <RouteContent />
         </div>
       </div>
     </AppShell>
   )
+}
+
+/** Route → view. `today` resolves the date at render so midnight rolls over. */
+function RouteContent(): ReactElement {
+  const { route } = useRouter()
+  switch (route.kind) {
+    case 'today':
+      return <DailyStream targetDate={todayIso()} />
+    case 'daily':
+      // A malformed date (impossible calendar day) anchors to today instead of
+      // letting dailyPath throw mid-render.
+      return <DailyStream targetDate={isIsoDate(route.date) ? route.date : todayIso()} />
+    case 'note':
+      return (
+        <ScrollRestored className="h-full overflow-auto px-6 py-8">
+          <div className="mx-auto w-full max-w-2xl">
+            <NotePane path={route.path} lazy autoFocus />
+          </div>
+        </ScrollRestored>
+      )
+    case 'search':
+      return (
+        <div className="p-6 text-sm text-[color:var(--text-muted)]">
+          Search arrives in Plan 08.
+        </div>
+      )
+  }
 }
