@@ -8,10 +8,10 @@ import {
   useState,
   type ReactNode,
 } from 'react'
-import { isTauri } from '@tauri-apps/api/core'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
   forgetRecent,
+  hasBridge,
   openGraph,
   recentGraphs,
   toAppError,
@@ -74,7 +74,7 @@ export function GraphProvider({ children }: { children: ReactNode }) {
 
   const loadRecents = useCallback(
     async (options?: { surfaceErrors?: boolean }): Promise<RecentGraph[]> => {
-      if (!isTauri()) {
+      if (!hasBridge()) {
         return [] // browser dev — there's no backend store to read.
       }
       try {

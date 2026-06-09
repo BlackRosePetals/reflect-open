@@ -1,21 +1,21 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { invoke } from '@tauri-apps/api/core'
+import { setBridge } from '@reflect/core'
 import type { NoteEditorHandle } from './note-editor'
 import { useNoteDocument } from './use-note-document'
 
-vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(), isTauri: () => true }))
-vi.mock('@tauri-apps/api/event', () => ({
-  listen: vi.fn((_, handler: (event: { payload: unknown }) => void) => {
-    emitChange = (payload) => handler({ payload })
-    return Promise.resolve(() => {
-      emitChange = null
-    })
-  }),
-}))
-
 let emitChange: ((payload: unknown) => void) | null = null
-const mockInvoke = vi.mocked(invoke)
+const mockInvoke = vi.fn<(command: string, args: Record<string, unknown>) => Promise<unknown>>()
+
+setBridge({
+  invoke: mockInvoke,
+  listen: async (_event, handler) => {
+    emitChange = handler
+    return () => {
+      emitChange = null
+    }
+  },
+})
 
 /** The fake on-disk file + a write log, behind the mocked IPC. */
 let disk: string
@@ -408,6 +408,43 @@ describe('useNoteDocument', () => {
     })
     const hook = renderHook(() => useNoteDocument('notes/gone.md', 1))
     await waitFor(() => expect(hook.result.current.status).toBe('error'))
+  })
+
+  it('a same-graph generation bump keeps unsaved edits and saves with the new generation', async () => {
+    vi.useFakeTimers()
+    try {
+      const written: Array<{ contents: string; generation: number }> = []
+      mockInvoke.mockImplementation(async (command, args) => {
+        if (command === 'note_read') {
+          return disk
+        }
+        if (command === 'note_write') {
+          const { contents, generation } = args as { contents: string; generation: number }
+          written.push({ contents, generation })
+          return null
+        }
+        return null
+      })
+
+      const hook = renderHook(({ gen }) => useNoteDocument('notes/a.md', gen), {
+        initialProps: { gen: 1 },
+      })
+      await act(() => vi.advanceTimersByTimeAsync(0))
+
+      // Reopening the same graph bumps the generation without remounting the
+      // pane. The dirty buffer must survive (no dispose/reload-from-disk) and
+      // the pending save must carry the NEW generation — a stale one would be
+      // rejected by Rust and the edit silently lost.
+      act(() => hook.result.current.onEditorChange('# Unsaved\n'))
+      hook.rerender({ gen: 2 })
+      expect(hook.result.current.dirty).toBe(true)
+
+      await act(() => vi.advanceTimersByTimeAsync(1000))
+      expect(written).toEqual([{ contents: '# Unsaved\n', generation: 2 }])
+      expect(hook.result.current.dirty).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('keepMine rewrites the file with the buffer', async () => {

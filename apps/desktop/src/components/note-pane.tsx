@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, type ReactElement } from 'react'
-import { convertFileSrc } from '@tauri-apps/api/core'
-import { assetPath, resolveWikiTarget, writeAsset } from '@reflect/core'
+import { useCallback, useEffect, useRef, type ReactElement } from 'react'
+import { resolveWikiTarget } from '@reflect/core'
 import { NoteEditor, type NoteEditorHandle } from '@/editor/note-editor'
-import type { ImageOptions } from '@/editor/images'
+import { useImagePersistence } from '@/editor/use-image-persistence'
 import { useNoteDocument } from '@/editor/use-note-document'
 import { isIsoDate } from '@/lib/dates'
 import { useGraph } from '@/providers/graph-provider'
@@ -18,24 +17,6 @@ interface NotePaneProps {
   autoFocus?: boolean
   /** Called once the autofocus actually happened (the editor mounted). */
   onAutoFocused?: () => void
-}
-
-const EXTENSION_BY_MIME: Record<string, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/gif': 'gif',
-  'image/webp': 'webp',
-  'image/svg+xml': 'svg',
-}
-
-function base64Of(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer)
-  let binary = ''
-  const chunk = 0x8000
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk))
-  }
-  return btoa(binary)
 }
 
 /**
@@ -57,6 +38,10 @@ export function NotePane({
   const graphRoot = graph?.root ?? null
   const generation = graph?.generation ?? null
   const document = useNoteDocument(path, generation, { createIfMissing: lazy })
+  const { options: images, saveError: imageSaveError } = useImagePersistence(
+    graphRoot,
+    generation,
+  )
 
   const unmountedRef = useRef(false)
   useEffect(() => {
@@ -92,34 +77,6 @@ export function NotePane({
     },
     [navigate],
   )
-
-  const resolveUrl = useCallback(
-    (src: string): string | null => {
-      if (/^https?:\/\//.test(src)) {
-        return src
-      }
-      if (graphRoot && src.startsWith('assets/')) {
-        return convertFileSrc(`${graphRoot}/${src}`)
-      }
-      return null
-    },
-    [graphRoot],
-  )
-
-  const saveImage = useCallback(
-    async (file: File): Promise<string | null> => {
-      const extension = EXTENSION_BY_MIME[file.type]
-      if (!extension || generation === null) {
-        return null
-      }
-      const target = assetPath(`pasted-${Date.now()}.${extension}`)
-      await writeAsset(target, base64Of(await file.arrayBuffer()), generation)
-      return target
-    },
-    [generation],
-  )
-
-  const images = useMemo<ImageOptions>(() => ({ resolveUrl, saveImage }), [resolveUrl, saveImage])
 
   const bindEditor = document.bindEditor
   const handleRef = useCallback(
@@ -174,6 +131,15 @@ export function NotePane({
         >
           Saving failed: {document.error}. Your edits are kept in the editor and the next
           successful save will persist them.
+        </div>
+      ) : null}
+
+      {imageSaveError !== null ? (
+        <div
+          role="alert"
+          className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300"
+        >
+          Couldn’t save the pasted image: {imageSaveError}. It was not added to the note.
         </div>
       ) : null}
 

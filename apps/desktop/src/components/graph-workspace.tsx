@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState, type ReactElement } from 'react'
-import { getAppVersion, type GraphInfo } from '@reflect/core'
+import { useCallback, type ReactElement } from 'react'
+import type { GraphInfo } from '@reflect/core'
 import { AppShell } from '@/components/app-shell'
 import { DailyStream } from '@/components/daily-stream'
 import { NotePane } from '@/components/note-pane'
+import { useAppVersion } from '@/hooks/use-app-version'
 import { isIsoDate, todayIso } from '@/lib/dates'
 import { useGraph } from '@/providers/graph-provider'
 import { useTheme } from '@/providers/theme-provider'
@@ -38,27 +39,8 @@ export function GraphWorkspace({ graph }: GraphWorkspaceProps): ReactElement {
 function WorkspaceContent({ graph }: GraphWorkspaceProps): ReactElement {
   const { resolvedTheme, setTheme } = useTheme()
   const { indexing } = useGraph()
-  const [version, setVersion] = useState<string | null>(null)
+  const version = useAppVersion()
   useAppShortcuts()
-
-  useEffect(() => {
-    let active = true
-    void (async () => {
-      try {
-        const result = await getAppVersion()
-        if (active) {
-          setVersion(result)
-        }
-      } catch {
-        if (active) {
-          setVersion(null)
-        }
-      }
-    })()
-    return () => {
-      active = false
-    }
-  }, [])
 
   const toggleTheme = useCallback((): void => {
     setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')
