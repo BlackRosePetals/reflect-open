@@ -2,7 +2,7 @@ import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { ReactNode } from 'react'
-import { setBridge } from '@reflect/core'
+import { setBridge, type AiModelConfig } from '@reflect/core'
 import { resetOperations, useOperations } from '@/lib/operations'
 import { flushSettings } from '@/lib/settings-flush'
 import { SETTINGS_QUERY_KEY, SettingsProvider, useSettings } from './settings-provider'
@@ -118,7 +118,16 @@ describe('SettingsProvider', () => {
     expect(result.current.settings.editorMarkdownSyntax).toBe('show')
     // The persisted document keeps unknown keys (newer-version settings survive).
     await waitFor(() =>
-      expect(saved).toEqual([{ editorMarkdownSyntax: 'show', theme: 'system', futureKey: true }]),
+      expect(saved).toEqual([
+        {
+          editorMarkdownSyntax: 'show',
+          semanticSearchEnabled: false,
+          theme: 'system',
+          aiModels: [],
+          defaultAiModelId: null,
+          futureKey: true,
+        },
+      ]),
     )
   })
 
@@ -142,7 +151,16 @@ describe('SettingsProvider', () => {
     // The load result must not clobber the update, and the deferred flush
     // persists the update merged over the *loaded* document.
     await waitFor(() =>
-      expect(saved).toEqual([{ editorMarkdownSyntax: 'show', theme: 'system', futureKey: true }]),
+      expect(saved).toEqual([
+        {
+          editorMarkdownSyntax: 'show',
+          semanticSearchEnabled: false,
+          theme: 'system',
+          aiModels: [],
+          defaultAiModelId: null,
+          futureKey: true,
+        },
+      ]),
     )
     expect(result.current.settings.editorMarkdownSyntax).toBe('show')
   })
@@ -160,9 +178,111 @@ describe('SettingsProvider', () => {
       releaseLoad()
     })
     await waitFor(() =>
-      expect(saved).toEqual([{ editorMarkdownSyntax: 'focus', theme: 'system' }]),
+      expect(saved).toEqual([
+        { editorMarkdownSyntax: 'focus', semanticSearchEnabled: false, theme: 'system', aiModels: [], defaultAiModelId: null },
+      ]),
     )
     expect(result.current.settings.editorMarkdownSyntax).toBe('focus')
+  })
+
+  it('updateSettingsWith builds each patch from the latest settings, not the closure', async () => {
+    stored = {
+      aiModels: [
+        { id: 'a', provider: 'openai', model: 'gpt-5.1', keyHint: '11111' },
+        { id: 'b', provider: 'openai', model: 'gpt-5', keyHint: '22222' },
+      ],
+    }
+    const { result } = renderHook(() => useSettings(), { wrapper })
+    await loadSettled()
+
+    // Both updaters are dispatched from the same render — equally "stale"
+    // closures. Sequential application means the second still sees the
+    // first's result; a snapshot-based merge would resurrect entry 'a'.
+    act(() => {
+      result.current.updateSettingsWith((current) => ({
+        aiModels: current.aiModels.filter((model) => model.id !== 'a'),
+      }))
+      result.current.updateSettingsWith((current) => ({
+        aiModels: current.aiModels.filter((model) => model.id !== 'b'),
+      }))
+    })
+    expect(result.current.settings.aiModels).toEqual([])
+  })
+
+  it('a read-modify-write racing the initial load replays over the loaded document', async () => {
+    const persisted: AiModelConfig = {
+      id: 'a',
+      provider: 'openai',
+      model: 'gpt-5.1',
+      keyHint: '11111',
+    }
+    const added: AiModelConfig = {
+      id: 'b',
+      provider: 'anthropic',
+      model: 'claude-opus-4-8',
+      keyHint: '22222',
+    }
+    stored = { aiModels: [persisted] }
+    gateLoad = true
+    const { result } = renderHook(() => useSettings(), { wrapper })
+
+    act(() => {
+      result.current.updateSettingsWith((current) => ({
+        aiModels: [...current.aiModels, added],
+      }))
+    })
+    // Held until hydration: applied over defaults, this "add one" would
+    // compute [added] and the eventual save would erase the persisted entry.
+    expect(result.current.settings.aiModels).toEqual([])
+    expect(saved).toEqual([])
+
+    act(() => {
+      releaseLoad()
+    })
+    await waitFor(() => expect(result.current.settings.aiModels).toEqual([persisted, added]))
+    await waitFor(() =>
+      expect(saved).toEqual([expect.objectContaining({ aiModels: [persisted, added] })]),
+    )
+  })
+
+  it('a queued read-modify-write still applies session-only when the load fails', async () => {
+    const added: AiModelConfig = {
+      id: 'b',
+      provider: 'anthropic',
+      model: 'claude-opus-4-8',
+      keyHint: '22222',
+    }
+    failLoad = true
+    const { result } = renderHook(() => useSettings(), { wrapper })
+
+    act(() => {
+      result.current.updateSettingsWith((current) => ({
+        aiModels: [...current.aiModels, added],
+      }))
+    })
+    // The failed load drains the queue over defaults — the edit must not
+    // vanish — but nothing is written over a store that couldn't be read.
+    await waitFor(() => expect(result.current.settings.aiModels).toEqual([added]))
+    await act(async () => {
+      await flushSettings()
+    })
+    expect(saved).toEqual([])
+  })
+
+  it('with no bridge (browser dev) the load settles as failed instead of hanging', async () => {
+    setBridge(null)
+    const { result } = renderHook(() => useSettings(), { wrapper })
+
+    // Waiters must not hang on a query that will never run.
+    await expect(result.current.whenSettingsLoaded()).resolves.toBe('failed')
+
+    // Read-modify-write updates drain immediately (session-only) rather than
+    // queueing forever, and nothing is ever persisted.
+    act(() => {
+      result.current.updateSettingsWith(() => ({ editorMarkdownSyntax: 'show' }))
+    })
+    expect(result.current.settings.editorMarkdownSyntax).toBe('show')
+    expect(saved).toEqual([])
   })
 
   it('keeps the applied value and surfaces a failed save as an operation', async () => {
@@ -205,7 +325,9 @@ describe('SettingsProvider', () => {
       result.current.updateSettings({ editorMarkdownSyntax: 'show' })
     })
     await waitFor(() =>
-      expect(saved).toEqual([{ editorMarkdownSyntax: 'show', theme: 'system' }]),
+      expect(saved).toEqual([
+        { editorMarkdownSyntax: 'show', semanticSearchEnabled: false, theme: 'system', aiModels: [], defaultAiModelId: null },
+      ]),
     )
   })
 
@@ -227,7 +349,9 @@ describe('SettingsProvider', () => {
     await act(async () => {
       await flushSettings()
     })
-    expect(saved).toEqual([{ editorMarkdownSyntax: 'show', theme: 'system' }])
+    expect(saved).toEqual([
+      { editorMarkdownSyntax: 'show', semanticSearchEnabled: false, theme: 'system', aiModels: [], defaultAiModelId: null },
+    ])
   })
 
   it('surfaces a failed load and keeps changes session-only', async () => {

@@ -75,17 +75,45 @@ export {
 export {
   settingsSchema,
   editorMarkdownSyntaxSchema,
+  semanticSearchEnabledSchema,
   themePreferenceSchema,
+  aiProviderIdSchema,
+  aiModelConfigSchema,
+  aiModelsSchema,
+  defaultAiModelIdSchema,
   DEFAULT_SETTINGS,
   type Settings,
   type EditorMarkdownSyntax,
   type ThemePreference,
+  type AiProviderId,
+  type AiModelConfig,
 } from './settings/schema'
 export { loadSettings, saveSettings } from './settings/commands'
+
+// AI providers & keychain secrets (Plan 10)
+export {
+  AI_PROVIDERS,
+  aiProvider,
+  aiModelLabel,
+  type AiProviderInfo,
+  type AiModelOption,
+} from './ai/provider-catalog'
+export { aiKeySecretName, setSecret, getSecret, deleteSecret } from './ai/secrets'
+export {
+  KEY_HINT_LENGTH,
+  apiKeyHint,
+  withAiModelAdded,
+  withAiModelRemoved,
+  defaultAiModel,
+  type AiModelsState,
+} from './ai/models'
+export { validateApiKey, type ApiKeyValidation } from './ai/validate-key'
 
 // Markdown document model (Plan 03)
 export {
   frontmatterSchema,
+  isPinned,
+  pinnedOrder,
   PARSED_NOTE_VERSION,
   parseNote,
   appendUnderHeading,
@@ -148,6 +176,7 @@ export {
   getLinkSources,
   getNote,
   getNotesByTag,
+  getPinnedNotes,
   searchNotes,
   suggestWikiTargets,
   getIndexedHashes,
@@ -164,6 +193,7 @@ export {
   type Backlink,
   type BacklinkContext,
   type NoteRow,
+  type PinnedNote,
   type SearchHit,
   type FileChange,
   type WikiSuggestion,
