@@ -1,6 +1,6 @@
 import {
+  errorMessage,
   getLinkSources,
-  isAppError,
   nextAliases,
   parseNote,
   readNote,
@@ -48,13 +48,6 @@ export interface RenameCoordinator {
   dispose(): void
 }
 
-function messageOf(error: unknown): string {
-  if (isAppError(error)) {
-    return error.message
-  }
-  return error instanceof Error ? error.message : String(error)
-}
-
 export function createRenameCoordinator(options: RenameCoordinatorOptions): RenameCoordinator {
   const { path, generation, canFire } = options
   /** Serializes rewrites — a second settle waits for the first. */
@@ -78,7 +71,13 @@ export function createRenameCoordinator(options: RenameCoordinatorOptions): Rena
         return
       }
       const operation = startOperation(`Renaming "${rename.from}" → "${rename.to}"`)
-      let failure: string | null = null
+      // The two phases fail independently, and the operation reports which
+      // held: a failed rewrite with a placed alias still resolves every old
+      // link, while a failed alias after a clean rewrite breaks none — only
+      // both failing leaves links dangling. One combined "failure" string
+      // can't say that.
+      let rewriteFailure: string | null = null
+      let aliasFailure: string | null = null
       try {
         let collision = false
         try {
@@ -100,7 +99,7 @@ export function createRenameCoordinator(options: RenameCoordinatorOptions): Rena
           // baseline has already advanced (re-arming would re-fire with a
           // stale `from` after further edits), so the alias is the safety
           // net that keeps every un-rewritten link resolving to this note.
-          failure = messageOf(cause)
+          rewriteFailure = errorMessage(cause)
           console.error('rename link rewrite failed:', cause)
         }
         if (collision) {
@@ -150,11 +149,22 @@ export function createRenameCoordinator(options: RenameCoordinatorOptions): Rena
           }
         }
       } catch (cause) {
-        failure = messageOf(cause)
+        aliasFailure = errorMessage(cause)
         console.error('rename alias placement failed:', cause)
       } finally {
-        if (failure !== null) {
-          operation.fail(failure) // the label already names the rename
+        // The label already names the rename; the message says what held.
+        if (rewriteFailure !== null && aliasFailure !== null) {
+          operation.fail(
+            `${rewriteFailure}; the old-title alias also failed (${aliasFailure}) — links to "${rename.from}" may no longer resolve`,
+          )
+        } else if (rewriteFailure !== null) {
+          operation.fail(
+            `${rewriteFailure} — links were not rewritten, but "${rename.from}" was kept as an alias so they still resolve`,
+          )
+        } else if (aliasFailure !== null) {
+          operation.fail(
+            `links were rewritten, but recording "${rename.from}" as an alias failed: ${aliasFailure}`,
+          )
         } else {
           operation.done()
         }

@@ -37,7 +37,7 @@ export {
   type RetrievalHit,
   type RetrieveOptions,
 } from './embeddings/retrieve'
-export { appErrorSchema, isAppError, toAppError, type AppError } from './errors'
+export { appErrorSchema, errorMessage, isAppError, toAppError, type AppError } from './errors'
 
 // Graph & file storage (Plan 02)
 export {
@@ -75,9 +75,11 @@ export {
 export {
   settingsSchema,
   editorMarkdownSyntaxSchema,
+  themePreferenceSchema,
   DEFAULT_SETTINGS,
   type Settings,
   type EditorMarkdownSyntax,
+  type ThemePreference,
 } from './settings/schema'
 export { loadSettings, saveSettings } from './settings/commands'
 
@@ -140,6 +142,7 @@ export {
   indexNote,
   rebuildIndex,
   reconcileIndex,
+  dailyDatesInRange,
   getBacklinks,
   getBacklinksWithContext,
   getLinkSources,

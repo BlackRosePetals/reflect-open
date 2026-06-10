@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { hasBridge, readNote, subscribeFileChanges, writeNote } from '@reflect/core'
+import { readNote, writeNote, type FileChange } from '@reflect/core'
+import { useFileChanges } from '@/lib/use-file-changes'
 import type { NoteEditorHandle } from './note-editor'
 import { registerOpenDocument } from './open-documents'
 import { createRenameCoordinator, type RenameCoordinator } from './rename-coordinator'
@@ -42,6 +43,12 @@ export interface NoteDocumentOptions {
    * not content.
    */
   trackRenames?: boolean
+  /**
+   * Markdown to seed a missing note's buffer with (the new-note title
+   * template). Requires `createIfMissing`; see `NoteSessionOptions.missingSeed`
+   * for the lazy-contract semantics.
+   */
+  missingSeed?: string
 }
 
 /**
@@ -57,6 +64,7 @@ export function useNoteDocument(
 ): NoteDocument {
   const createIfMissing = options?.createIfMissing ?? false
   const trackRenames = options?.trackRenames ?? false
+  const missingSeed = options?.missingSeed
   const [snapshot, setSnapshot] = useState<NoteSessionSnapshot>(INITIAL_NOTE_SNAPSHOT)
   const editorRef = useRef<NoteEditorHandle | null>(null)
   const sessionRef = useRef<NoteSession | null>(null)
@@ -115,6 +123,7 @@ export function useNoteDocument(
       applyContent: (markdown) => editorRef.current?.setMarkdown(markdown),
       onContent: coordinator ? coordinator.content : undefined,
       createIfMissing,
+      missingSeed,
     })
     sessionRef.current = session
     // One registration covers everything app-global teardown needs: the
@@ -149,32 +158,18 @@ export function useNoteDocument(
         })
       }
     }
-  }, [path, canWrite, createIfMissing, trackRenames])
+  }, [path, canWrite, createIfMissing, trackRenames, missingSeed])
 
   // External-change reconciliation via the watcher (Plan 04b events).
-  useEffect(() => {
-    if (!path || !hasBridge()) {
-      return
-    }
-    let active = true
-    let unlisten: (() => void) | null = null
-    void subscribeFileChanges((changes) => {
-      if (!active || !changes.some((change) => change.path === path && change.kind === 'upsert')) {
-        return
+  const onFileChanges = useCallback(
+    (changes: FileChange[]) => {
+      if (changes.some((change) => change.path === path && change.kind === 'upsert')) {
+        sessionRef.current?.externalChanged()
       }
-      sessionRef.current?.externalChanged()
-    }).then((fn) => {
-      if (active) {
-        unlisten = fn
-      } else {
-        fn()
-      }
-    })
-    return () => {
-      active = false
-      unlisten?.()
-    }
-  }, [path])
+    },
+    [path],
+  )
+  useFileChanges(path ? onFileChanges : null)
 
   // Flush pending edits when the window loses focus, and register with the
   // app-global registry so quit-time teardown (window close, ⌘Q — paths where

@@ -78,6 +78,7 @@ export function DailyStream({ targetDate }: DailyStreamProps): ReactElement {
   return (
     <div
       ref={scrollRef}
+      data-testid="daily-stream"
       className="h-full overflow-auto px-6"
       onScroll={(event) => saveScrollState(event.currentTarget.scrollTop)}
       // An explicit click/touch picks its own focus target — a focus still
@@ -108,7 +109,7 @@ export function DailyStream({ targetDate }: DailyStreamProps): ReactElement {
                 <h2 className="mb-3 text-lg font-semibold">
                   {formatDayLabel(date)}
                   {isToday ? (
-                    <span className="ml-2 align-middle text-xs font-medium text-[color:var(--accent)]">
+                    <span className="ml-2 align-middle text-xs font-medium text-accent">
                       Today
                     </span>
                   ) : null}

@@ -1,17 +1,18 @@
-import { useCallback, useEffect, useRef, type ReactElement } from 'react'
-import { isDaily, resolveWikiTarget } from '@reflect/core'
+import { useCallback, useRef, type ReactElement } from 'react'
+import { isDaily } from '@reflect/core'
 import { BacklinksPanel } from '@/components/backlinks-panel'
+import { InlineAlert } from '@/components/inline-alert'
+import { NoteConflictBanner } from '@/components/note-conflict-banner'
+import { ProtectedNoteView } from '@/components/protected-note-view'
 import { RelatedNotes } from '@/components/related-notes'
 import { NoteEditor, type NoteEditorHandle } from '@/editor/note-editor'
 import { useImagePersistence } from '@/editor/use-image-persistence'
 import { useNoteDocument } from '@/editor/use-note-document'
+import { useWikiLinkNavigation } from '@/editor/use-wiki-link-navigation'
 import { WikiAutocomplete } from '@/editor/wiki-autocomplete'
 import { createNoteWithTitle } from '@/lib/create-note'
-import { isIsoDate } from '@/lib/dates'
 import { useGraph } from '@/providers/graph-provider'
 import { useSettings } from '@/providers/settings-provider'
-import { useRouter } from '@/routing/router'
-import { routeForPath } from '@/routing/route'
 
 interface NotePaneProps {
   /** Graph-relative path of the note to edit. */
@@ -24,6 +25,9 @@ interface NotePaneProps {
   onAutoFocused?: () => void
 }
 
+/** The seeded title for a brand-new (missing) ordinary note. */
+const UNTITLED_SEED = '# Untitled\n'
+
 /**
  * One open note: the editor bound to its on-disk document via the Plan 05 save
  * pipeline (debounced atomic writes, watcher-driven external reload, and a
@@ -31,6 +35,10 @@ interface NotePaneProps {
  * Notes the editor can't faithfully round-trip open **protected** (read-only)
  * so a converter gap can never silently rewrite a file. Plan 06 mounts one of
  * these per day in the daily stream.
+ *
+ * The pane is composition only: document semantics live in
+ * `useNoteDocument`/`note-session.ts`, link-click behavior in
+ * `useWikiLinkNavigation`, and the banners are shared components.
  */
 export function NotePane({
   path,
@@ -39,61 +47,26 @@ export function NotePane({
   onAutoFocused,
 }: NotePaneProps): ReactElement {
   const { graph } = useGraph()
-  const { navigate } = useRouter()
   const { settings } = useSettings()
   const graphRoot = graph?.root ?? null
   const generation = graph?.generation ?? null
+  const dailyNote = isDaily(path)
   const document = useNoteDocument(path, generation, {
     createIfMissing: lazy,
     // Daily notes are excluded from rename tracking: their date labels are
     // stream chrome, not content (decided 2026-06-09).
-    trackRenames: !isDaily(path),
+    trackRenames: !dailyNote,
+    // A missing ordinary note opens as a titled template (old Reflect's
+    // new-note flow): the seed only reaches disk if the user edits, and the
+    // title is selected on focus so typing names the note. Daily notes stay
+    // unseeded — the date is their identity.
+    missingSeed: lazy && !dailyNote ? UNTITLED_SEED : undefined,
   })
   const { options: images, saveError: imageSaveError } = useImagePersistence(
     graphRoot,
     generation,
   )
-
-  const unmountedRef = useRef(false)
-  useEffect(() => {
-    unmountedRef.current = false
-    return () => {
-      unmountedRef.current = true
-    }
-  }, [])
-
-  // Mod+click on a [[wiki link]]: resolve via the index; an unresolved ISO date
-  // is still a valid daily target (created lazily on first write). An
-  // unresolved non-date target is created and opened on the spot (Plan 07's
-  // create-from-unresolved — frictionless, consistent with lazy dailies).
-  const onWikiLinkClick = useCallback(
-    (target: string) => {
-      void (async () => {
-        try {
-          const resolution = await resolveWikiTarget(target)
-          // The pane can unmount while resolution is in flight (route change,
-          // graph switch) — a late navigate would yank the user somewhere
-          // they've already left.
-          if (unmountedRef.current) {
-            return
-          }
-          if (resolution.kind === 'resolved') {
-            navigate(routeForPath(resolution.ref))
-          } else if (isIsoDate(resolution.text)) {
-            navigate({ kind: 'daily', date: resolution.text })
-          } else if (generation !== null && resolution.text.trim() !== '') {
-            const created = await createNoteWithTitle(resolution.text, generation)
-            if (!unmountedRef.current) {
-              navigate({ kind: 'note', path: created })
-            }
-          }
-        } catch (err) {
-          console.error('wiki-link resolution failed:', err)
-        }
-      })()
-    },
-    [navigate, generation],
-  )
+  const onWikiLinkClick = useWikiLinkNavigation(generation)
 
   // The `[[` autocomplete's create row: make the file; the popover inserts the
   // link text either way (a failed create just leaves an unresolved link).
@@ -107,11 +80,23 @@ export function NotePane({
   )
 
   const bindEditor = document.bindEditor
+  // Read through a ref so the callback's identity never changes with the
+  // snapshot — React re-invokes a changed callback ref (null, then handle),
+  // which would re-focus an editor the user is already typing in.
+  const missingRef = useRef(false)
+  missingRef.current = document.missing
   const handleRef = useCallback(
     (handle: NoteEditorHandle | null) => {
       bindEditor(handle)
       if (handle && autoFocus) {
-        handle.focus()
+        // A seeded new note focuses with "Untitled" selected so typing names
+        // it; selectTitle falls back to a plain focus when there's no heading
+        // (e.g. a lazy daily note).
+        if (missingRef.current) {
+          handle.selectTitle()
+        } else {
+          handle.focus()
+        }
         onAutoFocused?.()
       }
     },
@@ -120,7 +105,7 @@ export function NotePane({
 
   if (document.status === 'loading') {
     return (
-      <div className="px-1 py-2 text-sm text-[color:var(--text-muted)]">Loading note…</div>
+      <div className="px-1 py-2 text-sm text-text-muted">Loading note…</div>
     )
   }
 
@@ -135,17 +120,7 @@ export function NotePane({
   if (document.protected) {
     return (
       <div>
-        <div
-          role="alert"
-          className="mb-4 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
-        >
-          This note contains markdown the editor can’t yet reproduce faithfully (for
-          example task lists), so it’s open read-only to protect your file. Edit it in
-          another tool for now.
-        </div>
-        <pre className="reflect-protected-note whitespace-pre-wrap text-sm leading-relaxed">
-          {document.initialContent}
-        </pre>
+        <ProtectedNoteView content={document.initialContent} />
         <BacklinksPanel path={path} />
       </div>
     )
@@ -154,54 +129,30 @@ export function NotePane({
   return (
     <div className="relative" aria-label={`Editing ${path}`}>
       {document.error !== null ? (
-        <div
-          role="alert"
-          className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300"
-        >
+        <InlineAlert tone="error" className="mb-4">
           Saving failed: {document.error}. Your edits are kept in the editor and the next
           successful save will persist them.
-        </div>
+        </InlineAlert>
       ) : null}
 
       {imageSaveError !== null ? (
-        <div
-          role="alert"
-          className="mb-4 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300"
-        >
+        <InlineAlert tone="error" className="mb-4">
           Couldn’t save the pasted image: {imageSaveError}. It was not added to the note.
-        </div>
+        </InlineAlert>
       ) : null}
 
       {document.conflict !== null ? (
-        <div
-          role="alert"
-          className="mb-4 flex flex-wrap items-center gap-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300"
-        >
-          <span className="min-w-0 flex-1">
-            This note changed on disk while you had unsaved edits.
-          </span>
-          <button
-            type="button"
-            onClick={document.keepMine}
-            className="rounded border border-current/30 px-2 py-0.5 font-medium"
-          >
-            Keep mine
-          </button>
-          <button
-            type="button"
-            onClick={document.loadTheirs}
-            className="rounded border border-current/30 px-2 py-0.5 font-medium"
-          >
-            Load theirs
-          </button>
-        </div>
+        <NoteConflictBanner
+          onKeepMine={document.keepMine}
+          onLoadTheirs={document.loadTheirs}
+        />
       ) : null}
 
       {document.dirty ? (
         <span
           aria-label="Unsaved changes"
           title="Unsaved changes"
-          className="absolute -top-1 right-0 size-2 rounded-full bg-[var(--accent)]"
+          className="absolute -top-1 right-0 size-2 rounded-full bg-accent"
         />
       ) : null}
 

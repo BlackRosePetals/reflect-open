@@ -1,4 +1,5 @@
 import { type ReactElement } from 'react'
+import { Folder, FolderPlus } from 'lucide-react'
 import { useGraph } from '@/providers/graph-provider'
 
 /**
@@ -9,11 +10,11 @@ export function GraphChooser(): ReactElement {
   const { recents, error, pickAndOpen, openRecent, forget } = useGraph()
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center p-8">
+    <div className="flex h-screen w-screen items-center justify-center bg-surface-app p-8">
       <div className="w-full max-w-sm space-y-6">
         <div className="space-y-1 text-center">
-          <h1 className="text-xl font-semibold">Open a graph</h1>
-          <p className="text-sm text-[color:var(--text-secondary)]">
+          <h1 className="text-xl font-semibold text-text">Open a graph</h1>
+          <p className="text-sm text-text-secondary">
             Pick a folder for your notes — Reflect stores them as plain markdown.
           </p>
         </div>
@@ -21,43 +22,53 @@ export function GraphChooser(): ReactElement {
         <button
           type="button"
           onClick={() => void pickAndOpen()}
-          className="w-full rounded-md bg-[var(--accent)] px-3 py-2 text-sm font-medium text-[var(--text-on-brand,#fff)]"
+          className="flex w-full items-center justify-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-text-on-brand shadow-sm transition-colors duration-100 hover:bg-accent-hover"
         >
+          <FolderPlus aria-hidden strokeWidth={1.75} className="size-4" />
           Open graph…
         </button>
 
         {error ? (
-          <p role="alert" className="text-center text-sm text-red-500">
+          <p role="alert" className="text-center text-sm text-destructive">
             {error}
           </p>
         ) : null}
 
         {recents.length > 0 ? (
           <div className="space-y-2">
-            <p className="text-xs font-medium tracking-wide text-[color:var(--text-muted)] uppercase">
+            <p className="px-2 text-[11px] font-semibold tracking-[0.08em] text-text-muted uppercase">
               Recent
             </p>
-            <ul className="space-y-1">
+            <ul className="space-y-px">
               {recents.map((recent) => (
                 <li
                   key={recent.root}
-                  className="group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 hover:bg-black/5 dark:hover:bg-white/5"
+                  className="group flex items-center justify-between gap-2 rounded-md px-2 py-1.5 transition-colors duration-100 hover:bg-surface-hover"
                 >
                   <button
                     type="button"
                     onClick={() => void openRecent(recent.root)}
-                    className="min-w-0 flex-1 text-left"
+                    className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
                   >
-                    <span className="block truncate text-sm font-medium">{recent.name}</span>
-                    <span className="block truncate text-xs text-[color:var(--text-muted)]">
-                      {recent.root}
+                    <Folder
+                      aria-hidden
+                      strokeWidth={1.75}
+                      className="size-4 shrink-0 text-text-muted"
+                    />
+                    <span className="min-w-0">
+                      <span className="block truncate text-sm font-medium text-text">
+                        {recent.name}
+                      </span>
+                      <span className="block truncate text-xs text-text-muted">
+                        {recent.root}
+                      </span>
                     </span>
                   </button>
                   <button
                     type="button"
                     onClick={() => void forget(recent.root)}
                     aria-label={`Forget ${recent.name}`}
-                    className="shrink-0 text-xs text-[color:var(--text-muted)] opacity-0 group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100"
+                    className="shrink-0 rounded text-xs text-text-muted opacity-0 transition-opacity duration-100 group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100 hover:text-text-secondary"
                   >
                     Forget
                   </button>

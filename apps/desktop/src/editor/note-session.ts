@@ -1,4 +1,4 @@
-import { isAppError, splitFrontmatter, upsertFrontmatter } from '@reflect/core'
+import { errorMessage, isAppError, splitFrontmatter, upsertFrontmatter } from '@reflect/core'
 import type { RoundTripFidelity } from './roundtrip'
 
 /**
@@ -50,6 +50,11 @@ export interface NoteSessionSnapshot {
   protected: boolean
   /** True while the buffer has changes not yet written to disk. */
   dirty: boolean
+  /**
+   * True when the initial load found no file (the lazy-create contract): the
+   * note exists only as this buffer until the first save lands.
+   */
+  missing: boolean
   /** External content waiting on the user's choice (set only when dirty). */
   conflict: string | null
   error: string | null
@@ -61,6 +66,7 @@ export const INITIAL_NOTE_SNAPSHOT: NoteSessionSnapshot = {
   initialContent: '',
   protected: false,
   dirty: false,
+  missing: false,
   conflict: null,
   error: null,
 }
@@ -108,7 +114,27 @@ export interface NoteSessionOptions {
    * a no-op rather than silently emptying the editor.
    */
   createIfMissing?: boolean
+  /**
+   * Markdown to seed a **missing** note's buffer with (only meaningful with
+   * `createIfMissing`) — the new-note title template. The seed is adopted as
+   * the clean dirty-comparison baseline, so opening still writes nothing: the
+   * file is created only once the user edits, lazy contract intact. The
+   * rename tracker baselines on the real (empty) disk content, so the first
+   * authored title stays a birth, not a rename.
+   */
+  missingSeed?: string
   saveDebounceMs?: number
+}
+
+/**
+ * The frontmatter keys the app patches through a live session — deliberately
+ * narrower than what `upsertFrontmatter` can write, so a typo'd key can't
+ * silently land junk in a note's header. Extend it when a new key earns a
+ * session-channel writer.
+ */
+export interface FrontmatterPatch {
+  /** Alternative wiki-link titles for this note (the Plan 07b auto-alias). */
+  aliases?: string[]
 }
 
 /** One open note's document lifecycle. Create via {@link createNoteSession}. */
@@ -136,11 +162,13 @@ export interface NoteSession {
   /**
    * Patch frontmatter keys (e.g. `aliases`, Plan 07b) without touching the
    * editor: the header is updated in place and saved through the normal
-   * pipeline. Returns false (and does nothing) while protected, not ready,
-   * or disposed — callers with a fallback path (the rename coordinator's
-   * direct disk write) branch on it.
+   * pipeline. Returns false (and does nothing) when the session can't take
+   * the patch — disposed, protected, or not yet `ready`. All three mean the
+   * same thing to a caller: this channel is unavailable, use the fallback
+   * (the rename coordinator writes straight to disk, which a live session
+   * then reconciles like any external change).
    */
-  updateFrontmatter: (patch: Record<string, unknown>) => boolean
+  updateFrontmatter: (patch: FrontmatterPatch) => boolean
   /** Flush pending edits and detach: no further snapshots are emitted. */
   dispose: () => void
 }
@@ -155,6 +183,7 @@ function splitDoc(content: string): { header: string; body: string } {
 export function createNoteSession(options: NoteSessionOptions): NoteSession {
   const { path, io, classify, onSnapshot, applyContent, onContent } = options
   const createIfMissing = options.createIfMissing ?? false
+  const missingSeed = options.missingSeed
   const saveDebounceMs = options.saveDebounceMs ?? DEFAULT_SAVE_DEBOUNCE_MS
 
   // Snapshot state (surfaces via onSnapshot).
@@ -162,6 +191,7 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
   let initialContent = ''
   let isProtected = false
   let dirty = false
+  let missing = false
   let conflict: string | null = null
   let error: string | null = null
 
@@ -201,6 +231,7 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
       initialContent,
       protected: isProtected,
       dirty,
+      missing,
       conflict,
       error,
     }
@@ -210,6 +241,7 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
       lastEmitted.initialContent === next.initialContent &&
       lastEmitted.protected === next.protected &&
       lastEmitted.dirty === next.dirty &&
+      lastEmitted.missing === next.missing &&
       lastEmitted.conflict === next.conflict &&
       lastEmitted.error === next.error
     ) {
@@ -242,6 +274,7 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
           await write(path, content)
           disk = content
           dirty = header + buffer !== content
+          missing = false // the landed write created the file if it was missing
           error = null // a previous save failure is resolved by this success
           emit()
           onContent?.(content, 'saved')
@@ -251,7 +284,7 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
       })
       .catch((cause) => {
         console.error('failed to save note:', cause)
-        error = messageOf(cause)
+        error = errorMessage(cause)
         emit()
       })
   }
@@ -294,6 +327,13 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
     }
     buffer = markdown
     dirty = header + markdown !== disk
+    if (missing && markdown.trim() === '') {
+      // A still-unwritten note cleared back to nothing (e.g. the seeded
+      // "Untitled" template deleted wholesale) stays unwritten: creating an
+      // empty file would break the lazy no-litter contract. Dirtiness — and
+      // the file's birth — resume with the next real content.
+      dirty = false
+    }
     emit()
     if (dirty) {
       scheduleSave()
@@ -319,6 +359,7 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
     buffer = doc.body
     disk = content
     dirty = false
+    missing = false // external content means the file exists on disk now
     // Re-gate: the content may have introduced (or removed) syntax the editor
     // can't round-trip. When protection flips the pane remounts via
     // initialContent; otherwise reload the live editor in place.
@@ -346,8 +387,19 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
     } catch {
       return // deleted/unreadable between event and read; nothing to reconcile
     }
-    if (disposed || content === disk || content === inFlightWrite) {
-      return // stale, or an echo of our own (possibly still-settling) save
+    if (disposed) {
+      return
+    }
+    if (content === disk || content === inFlightWrite) {
+      // Nothing to reconcile (stale, or an echo of our own possibly
+      // still-settling save) — but a successful read of a previously-missing
+      // note means the file exists now (e.g. another device wrote the seed
+      // verbatim), so record that transition before skipping.
+      if (missing) {
+        missing = false
+        emit()
+      }
+      return
     }
     if (dirty) {
       // Never clobber unsaved edits — park the external content and pause the
@@ -362,12 +414,12 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
   }
 
   /** The initial read; with `createIfMissing`, a missing file is an empty note. */
-  async function readInitial(): Promise<string> {
+  async function readInitial(): Promise<{ content: string; fileMissing: boolean }> {
     try {
-      return await io.read(path)
+      return { content: await io.read(path), fileMissing: false }
     } catch (cause) {
       if (createIfMissing && isAppError(cause) && cause.kind === 'notFound') {
-        return '' // lazy note: starts empty, created by the first save
+        return { content: '', fileMissing: true } // lazy note: created by the first save
       }
       throw cause
     }
@@ -382,24 +434,31 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
     emit()
     void (async () => {
       try {
-        const content = await readInitial()
+        const { content, fileMissing } = await readInitial()
         if (disposed) {
           return
         }
-        const doc = splitDoc(content)
+        // A missing note adopts the seed as its clean baseline: the editor
+        // shows the template, but disk-comparison sees no difference, so
+        // nothing is written until a real edit (the lazy no-litter contract).
+        const adopted = fileMissing && missingSeed !== undefined ? missingSeed : content
+        const doc = splitDoc(adopted)
         header = doc.header
         buffer = doc.body
-        disk = content
+        disk = adopted
         dirty = false
+        missing = fileMissing
         // The data-loss gate: a note the editor can't reproduce opens read-only.
         isProtected = classify(doc.body) === 'lossy'
-        initialContent = isProtected ? content : doc.body
+        initialContent = isProtected ? adopted : doc.body
         status = 'ready'
         emit()
+        // The real disk content, not the seed: the rename tracker must
+        // baseline untitled so the first authored title is a birth.
         onContent?.(content, 'load')
       } catch (cause) {
         if (!disposed) {
-          error = messageOf(cause)
+          error = errorMessage(cause)
           status = 'error'
           emit()
         }
@@ -447,11 +506,11 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
     adoptCleanContent(content)
   }
 
-  function updateFrontmatter(patch: Record<string, unknown>): boolean {
+  function updateFrontmatter(patch: FrontmatterPatch): boolean {
     if (disposed || isProtected || status !== 'ready') {
       return false
     }
-    header = splitDoc(upsertFrontmatter(header + buffer, patch)).header
+    header = splitDoc(upsertFrontmatter(header + buffer, { ...patch })).header
     dirty = header + buffer !== disk
     emit()
     if (dirty) {
@@ -479,11 +538,4 @@ export function createNoteSession(options: NoteSessionOptions): NoteSession {
     updateFrontmatter,
     dispose,
   }
-}
-
-function messageOf(error: unknown): string {
-  if (isAppError(error)) {
-    return error.message
-  }
-  return error instanceof Error ? error.message : String(error)
 }

@@ -26,7 +26,7 @@ vi.mock('@reflect/core', async (importOriginal) => ({
 }))
 
 // Importing registers the commands (module side effect, like production).
-const { APP_COMMANDS } = await import('./app-commands')
+const { APP_COMMANDS, keybindingFor } = await import('./app-commands')
 
 function command(id: string) {
   const found = APP_COMMANDS.find((entry) => entry.id === id)
@@ -43,6 +43,7 @@ function fakeContext(overrides?: Partial<CommandContext>) {
     back: vi.fn(),
     forward: vi.fn(),
     toggleTheme: vi.fn(),
+    toggleSidebar: vi.fn(),
     generation: () => 7,
     openPalette: vi.fn(),
     ...overrides,
@@ -50,8 +51,20 @@ function fakeContext(overrides?: Partial<CommandContext>) {
   return { context, navigated }
 }
 
+describe('keybindingFor', () => {
+  it('returns the binding UI hints derive from', () => {
+    expect(keybindingFor('nav.today')).toBe('Mod-d')
+    expect(keybindingFor('palette.open')).toBe('Mod-k')
+  })
+
+  it('returns null for unbound commands and unknown ids', () => {
+    expect(keybindingFor('theme.toggle')).toBeNull() // a real command, no binding
+    expect(keybindingFor('no.such.command')).toBeNull()
+  })
+})
+
 describe('app commands', () => {
-  it('nav.today, history, palette, and theme commands hit their capabilities', async () => {
+  it('nav.today, history, palette, theme, and sidebar commands hit their capabilities', async () => {
     const { context, navigated } = fakeContext()
     await command('nav.today').run(context)
     expect(navigated).toEqual([{ kind: 'today' }])
@@ -63,6 +76,8 @@ describe('app commands', () => {
     expect(context.openPalette).toHaveBeenCalled()
     await command('theme.toggle').run(context)
     expect(context.toggleTheme).toHaveBeenCalled()
+    await command('sidebar.toggle').run(context)
+    expect(context.toggleSidebar).toHaveBeenCalled()
   })
 
   it('settings.open navigates to the settings screen', async () => {
