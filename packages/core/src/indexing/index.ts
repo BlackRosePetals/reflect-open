@@ -15,6 +15,7 @@ export {
 export {
   FILE_CHANGES_EVENT,
   subscribeFileChanges,
+  emitFileChanges,
   type FileChange,
 } from './file-changes'
 export {
@@ -47,6 +48,7 @@ export {
   dailyDatesInRange,
   getBacklinks,
   getBacklinksWithContext,
+  getConflictedNotes,
   getIndexMeta,
   getLinkSources,
   getNote,
@@ -58,6 +60,7 @@ export {
   resolveWikiTarget,
   type Backlink,
   type BacklinkContext,
+  type ConflictedNote,
   type NoteRow,
   type PinnedNote,
   type SearchHit,

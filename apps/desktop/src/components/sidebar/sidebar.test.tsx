@@ -38,6 +38,16 @@ vi.mock('@/providers/settings-provider', () => ({
     updateSettingsWith,
   }),
 }))
+vi.mock('@/providers/sync-provider', () => ({
+  useSync: () => ({
+    backup: { phase: 'disconnected' },
+    connectNewRepo: async () => {},
+    connectExistingRepo: async () => 'connected',
+    disconnectGraph: async () => {},
+    signOut: async () => {},
+    backUpNow: async () => {},
+  }),
+}))
 
 const GRAPH: GraphInfo = { root: '/notes', name: 'Notes', cloudSync: null, generation: 1 }
 

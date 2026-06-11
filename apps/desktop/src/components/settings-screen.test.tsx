@@ -7,11 +7,22 @@ import { resetOperations } from '@/lib/operations'
 import { SettingsProvider } from '@/providers/settings-provider'
 import { SettingsScreen } from './settings-screen'
 
-// The rebuild-index field reads the open index generation from the graph
-// provider; the screen tests run without a GraphProvider, so stub the hook.
+// The rebuild-index field reads the open index generation — and the Backup
+// section the open graph + sync state — from per-graph providers the screen
+// tests don't mount, so stub both hooks (no graph open, backup disconnected).
 const graph = vi.hoisted(() => ({ indexGeneration: 7 as number | null }))
 vi.mock('@/providers/graph-provider', () => ({
-  useGraph: () => ({ indexGeneration: graph.indexGeneration }),
+  useGraph: () => ({ graph: null, indexGeneration: graph.indexGeneration }),
+}))
+vi.mock('@/providers/sync-provider', () => ({
+  useSync: () => ({
+    backup: { phase: 'disconnected' },
+    connectNewRepo: async () => {},
+    connectExistingRepo: async () => 'connected',
+    disconnectGraph: async () => {},
+    signOut: async () => {},
+    backUpNow: async () => {},
+  }),
 }))
 
 // jsdom doesn't implement this; Radix Select scrolls the selected option into

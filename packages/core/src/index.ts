@@ -38,7 +38,14 @@ export {
   type RetrievalHit,
   type RetrieveOptions,
 } from './embeddings/retrieve'
-export { appErrorSchema, errorMessage, isAppError, toAppError, type AppError } from './errors'
+export {
+  appErrorSchema,
+  errorMessage,
+  isAppError,
+  toAppError,
+  ReflectError,
+  type AppError,
+} from './errors'
 
 // Graph & file storage (Plan 02)
 export {
@@ -113,7 +120,8 @@ export {
   type AiProviderInfo,
   type AiModelOption,
 } from './ai/provider-catalog'
-export { aiKeySecretName, setSecret, getSecret, deleteSecret } from './ai/secrets'
+export { aiKeySecretName } from './ai/secrets'
+export { setSecret, getSecret, deleteSecret } from './secrets/keychain'
 export {
   KEY_HINT_LENGTH,
   apiKeyHint,
@@ -123,6 +131,47 @@ export {
   type AiModelsState,
 } from './ai/models'
 export { validateApiKey, type ApiKeyValidation } from './ai/validate-key'
+
+// Backup & sync (Plan 12)
+export {
+  gitStatus,
+  gitSetup,
+  gitCommitAll,
+  gitFetch,
+  gitMergeRemote,
+  gitPush,
+  isDeviceFlowConfigured,
+  saveGithubAuth,
+  loadGithubAuth,
+  clearGithubAuth,
+  deviceFlowStart,
+  deviceFlowPoll,
+  runDeviceFlow,
+  getGithubToken,
+  gitDisconnect,
+  gitClone,
+  parseGithubRemote,
+  githubRemoteUrl,
+  createGithubRepo,
+  getGithubRepo,
+  createSyncEngine,
+  isSyncError,
+  type GitStatus,
+  type CommitOutcome,
+  type MergeOutcome,
+  type PushOutcome,
+  type SkippedFile,
+  type ChangedFile,
+  type GithubAuth,
+  type DeviceFlowStart,
+  type DevicePollResult,
+  type GithubRepoRef,
+  type GithubRepo,
+  type SyncEngine,
+  type SyncEngineOptions,
+  type SyncErrorKind,
+  type SyncStatus,
+} from './sync'
 
 // Markdown document model (Plan 03)
 export {
@@ -141,6 +190,8 @@ export {
   splitFrontmatter,
   parseFrontmatter,
   upsertFrontmatter,
+  detectConflictMarkers,
+  resolveConflictMarkers,
   parseBody,
   reflectMarkdownParser,
   wikiLinkExtension,
@@ -150,6 +201,7 @@ export {
   foldTag,
   isTagName,
   normalizeWikiTarget,
+  type ConflictResolution,
   type Frontmatter,
   type Span,
   type WikiLink,
@@ -178,6 +230,7 @@ export {
   watchStop,
   subscribeIndexChanges,
   subscribeFileChanges,
+  emitFileChanges,
   applyIndexChanges,
   hashContent,
   buildIndexedNote,
@@ -191,6 +244,7 @@ export {
   dailyDatesInRange,
   getBacklinks,
   getBacklinksWithContext,
+  getConflictedNotes,
   getLinkSources,
   getNote,
   getNotesByTag,
@@ -212,6 +266,7 @@ export {
   type IndexedAlias,
   type Backlink,
   type BacklinkContext,
+  type ConflictedNote,
   type NoteRow,
   type NoteListEntry,
   type NoteListOptions,

@@ -9,6 +9,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'editor', title: 'Editor' },
   { id: 'all-notes', title: 'All notes' },
   { id: 'search', title: 'Search' },
+  { id: 'backup', title: 'Backup' },
   { id: 'ai-models', title: 'AI models' },
   { id: 'keyboard', title: 'Keyboard shortcuts' },
   { id: 'about', title: 'About' },

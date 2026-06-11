@@ -110,7 +110,7 @@ fn lock_graph<'a>(
     })
 }
 
-fn current_root(state: &State<GraphState>) -> AppResult<PathBuf> {
+pub(crate) fn current_root(state: &State<GraphState>) -> AppResult<PathBuf> {
     lock_graph(state)?
         .root
         .clone()
@@ -121,7 +121,10 @@ fn current_root(state: &State<GraphState>) -> AppResult<PathBuf> {
 /// issued for. A stale generation means the graph was switched after the
 /// command was enqueued — the mutation must be rejected (loudly), or it would
 /// land in the *new* graph's same-named file.
-fn root_for_generation(state: &State<GraphState>, generation: u64) -> AppResult<PathBuf> {
+pub(crate) fn root_for_generation(
+    state: &State<GraphState>,
+    generation: u64,
+) -> AppResult<PathBuf> {
     let inner = lock_graph(state)?;
     if inner.generation != generation {
         return Err(AppError::io(

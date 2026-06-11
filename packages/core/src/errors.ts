@@ -13,10 +13,29 @@ export const appErrorSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('traversal'), message: z.string() }),
   z.object({ kind: z.literal('noGraph'), message: z.string() }),
   z.object({ kind: z.literal('parse'), message: z.string() }),
+  z.object({ kind: z.literal('auth'), message: z.string() }),
+  z.object({ kind: z.literal('network'), message: z.string() }),
   z.object({ kind: z.literal('unknown'), message: z.string() }),
 ])
 
 export type AppError = z.infer<typeof appErrorSchema>
+
+/**
+ * The throwable form of {@link AppError} for TypeScript code that *originates*
+ * app errors (GitHub module, providers): a real `Error` subclass — stack
+ * traces survive — whose `kind`/`message` own-properties still satisfy
+ * {@link isAppError}, so `catch` sites branch on it exactly like a
+ * Rust-originated error.
+ */
+export class ReflectError extends Error {
+  readonly kind: AppError['kind']
+
+  constructor(kind: AppError['kind'], message: string) {
+    super(message)
+    this.name = 'ReflectError'
+    this.kind = kind
+  }
+}
 
 /** Type guard: is this value a well-formed {@link AppError}? */
 export function isAppError(value: unknown): value is AppError {
