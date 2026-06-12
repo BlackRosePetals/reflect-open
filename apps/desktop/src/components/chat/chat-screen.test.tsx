@@ -10,7 +10,8 @@ import { RouterProvider } from '@/routing/router'
  * The chat view over a faked engine: the provider stack and screen are real,
  * `streamChat` is scripted. Covers the no-provider call-to-action, a full
  * grounded turn (user bubble → tool chip → cited answer), the model picker,
- * the plain-while-streaming text rendering, abort-on-unmount, and New chat.
+ * the plain-while-streaming text rendering, abort-on-unmount, New chat, and
+ * photo attachments (drop → preview → image-only send).
  */
 
 const streamChat = vi.hoisted(() =>
@@ -73,10 +74,18 @@ function scriptTurn(events: ChatStreamEvent[]) {
   })
 }
 
+/** A tiny PNG-magic-bytes file — base64 `iVBORw==` once read. */
+function pngFile(name: string): File {
+  return new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], name, { type: 'image/png' })
+}
+
 let probedSend: ((text: string) => Promise<void>) | null = null
+let probedNewChat: (() => void) | null = null
 
 function SendProbe(): ReactElement | null {
-  probedSend = useChatSession().send
+  const session = useChatSession()
+  probedSend = session.send
+  probedNewChat = session.newChat
   return null
 }
 
@@ -276,6 +285,92 @@ describe('ChatScreen', () => {
     // must not keep reading whichever graph is open now.
     view.unmount()
     expect(signal?.aborted).toBe(true)
+  })
+
+  it('sends a dropped photo with no text as an image-only message', async () => {
+    configureModel()
+    scriptTurn([
+      { type: 'text-delta', text: 'A cat.' },
+      { type: 'complete', messages: [{ role: 'assistant', content: 'A cat.' }] },
+    ])
+    const view = renderChat()
+
+    // Dropped on the textarea, handled by the screen-level drop target.
+    fireEvent.drop(view.getByLabelText('Chat message'), {
+      dataTransfer: { files: [pngFile('cat.png')], types: ['Files'] },
+    })
+    await view.findByRole('button', { name: 'Remove cat.png' })
+
+    await userEvent.type(view.getByLabelText('Chat message'), '{Enter}')
+
+    await waitFor(() => expect(streamChat).toHaveBeenCalled())
+    expect(streamChat.mock.lastCall?.[0]?.messages.at(-1)).toEqual({
+      role: 'user',
+      content: [
+        { type: 'image', image: 'data:image/png;base64,iVBORw==', mediaType: 'image/png' },
+      ],
+    })
+    // The queue cleared; the photo now lives in the transcript bubble.
+    expect(view.queryByRole('button', { name: 'Remove cat.png' })).toBeNull()
+    expect(view.getByAltText('cat.png')).toBeDefined()
+  })
+
+  it('a drop still reading when New chat clears the session never lands', async () => {
+    configureModel()
+    const view = renderChat()
+
+    // A file whose read only settles when the test says so.
+    let releaseRead: (buffer: ArrayBuffer) => void = () => {}
+    const file = pngFile('cat.png')
+    Object.defineProperty(file, 'arrayBuffer', {
+      value: () =>
+        new Promise<ArrayBuffer>((resolve) => {
+          releaseRead = resolve
+        }),
+    })
+    fireEvent.drop(view.getByLabelText('Chat message'), {
+      dataTransfer: { files: [file], types: ['Files'] },
+    })
+
+    await act(async () => {
+      probedNewChat?.()
+    })
+    await act(async () => {
+      releaseRead(new Uint8Array([0x89]).buffer)
+    })
+
+    expect(view.queryByAltText('cat.png')).toBeNull()
+  })
+
+  it('claims non-image file drops so the webview never navigates to them', () => {
+    configureModel()
+    const view = renderChat()
+
+    const notCancelled = fireEvent.drop(view.getByLabelText('Chat message'), {
+      dataTransfer: {
+        files: [new File(['hi'], 'notes.txt', { type: 'text/plain' })],
+        types: ['Files'],
+      },
+    })
+
+    // fireEvent returns false when a handler called preventDefault.
+    expect(notCancelled).toBe(false)
+    expect(view.queryByAltText('notes.txt')).toBeNull()
+  })
+
+  it('a removed attachment never sends', async () => {
+    configureModel()
+    const view = renderChat()
+
+    fireEvent.drop(view.getByLabelText('Chat message'), {
+      dataTransfer: { files: [pngFile('cat.png')], types: ['Files'] },
+    })
+    await userEvent.click(await view.findByRole('button', { name: 'Remove cat.png' }))
+    expect(view.queryByAltText('cat.png')).toBeNull()
+
+    // Nothing left to send: Enter on the empty composer is a no-op again.
+    await userEvent.type(view.getByLabelText('Chat message'), '{Enter}')
+    expect(streamChat).not.toHaveBeenCalled()
   })
 
   it('New chat clears the conversation', async () => {

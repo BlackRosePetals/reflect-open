@@ -1,6 +1,7 @@
 import type { ReactElement } from 'react'
 import { MessageSquare } from 'lucide-react'
 import { Button } from '@/components/ui/button'
+import { imageFilesFrom } from '@/lib/chat-attachments'
 import { useChatSession } from '@/providers/chat-provider'
 import { useRouter } from '@/routing/router'
 import { ChatInput } from './chat-input'
@@ -13,9 +14,12 @@ import { ChatTurnList } from './chat-turn-list'
  * writes. With no AI provider configured the view is one call-to-action into
  * Settings; the conversation itself lives in {@link useChatSession}, so
  * navigating away and back keeps it.
+ *
+ * The whole view accepts dropped images — aiming for the composer exactly
+ * shouldn't be required — and queues them as the next message's attachments.
  */
 export function ChatScreen(): ReactElement {
-  const { providers } = useChatSession()
+  const { providers, attachImages } = useChatSession()
   const { navigate } = useRouter()
 
   if (providers.length === 0) {
@@ -37,7 +41,26 @@ export function ChatScreen(): ReactElement {
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col">
+    <div
+      className="flex h-full min-h-0 flex-col"
+      onDragOver={(event) => {
+        if (event.dataTransfer.types.includes('Files')) {
+          event.preventDefault()
+        }
+      }}
+      onDrop={(event) => {
+        if (event.dataTransfer.files.length === 0) {
+          return
+        }
+        // Claim every file drop, matching or not: the webview's default for
+        // an unhandled file is to navigate to it, replacing the app.
+        event.preventDefault()
+        const files = imageFilesFrom(event.dataTransfer)
+        if (files.length > 0) {
+          void attachImages(files)
+        }
+      }}
+    >
       <ChatTurnList />
       <ChatInput />
     </div>
