@@ -29,6 +29,8 @@ export interface TaskKeyboardOptions {
   onToggleFilters: () => void
   /** ⌘⇧S: open/close the schedule calendar for the selection (V1). */
   onToggleSchedule: () => void
+  /** ⌘⇧K: convert the selection to plain bullets (V1's "Convert to checklist"). */
+  onConvertToBullet: () => void
 }
 
 /** Elements that own their own keyboard nav — the shortcuts back off entirely. */
@@ -44,8 +46,9 @@ const OWNS_KEYS = '[data-task-editor], [role="menu"], [role="dialog"], [role="li
  * The map: Return adds a task (to the selected task's note, else today's daily),
  * ⌘A select all, ↑/↓ move a single selection (Shift to extend the range), ⌘↵
  * complete the selection, ⌘⇧↵ archive (stop showing the session's completed
- * tasks), ⌘⌫ delete (plain ⌫ deletes only empty rows, so a stray Backspace can't
- * lose content), Esc clears the selection then the search box.
+ * tasks), ⌘⇧K convert the selection to plain bullets (drop the checkbox), ⌘⌫
+ * delete (plain ⌫ deletes only empty rows, so a stray Backspace can't lose
+ * content), Esc clears the selection then the search box.
  *
  * Scoping: the listener is on `document` (so the shortcuts work the moment you're
  * on Tasks, no click needed — the screen focuses its surface on mount), but backs
@@ -72,6 +75,7 @@ export function useTaskKeyboard({
   scrollToKey,
   onToggleFilters,
   onToggleSchedule,
+  onConvertToBullet,
 }: TaskKeyboardOptions): void {
   const handlerRef = useRef<(event: KeyboardEvent) => void>(() => {})
   useEffect(() => {
@@ -191,6 +195,15 @@ export function useTaskKeyboard({
       } else if (mod && (event.key === 'a' || event.key === 'A')) {
         event.preventDefault()
         selection.selectAll()
+      } else if (mod && event.shiftKey && (event.key === 'k' || event.key === 'K')) {
+        // ⌘⇧K converts the selection to plain bullets (V1's "Convert to checklist").
+        // Below the OWNS_KEYS bail on purpose: while the inline editor is focused it
+        // handles ⌘⇧K itself (flush the draft, then convert), so this fires only for a
+        // multi-selection or an unfocused single selection — never racing a live draft.
+        if (selection.selectedCount > 0) {
+          event.preventDefault()
+          onConvertToBullet()
+        }
       } else if (event.key === 'ArrowDown') {
         event.preventDefault()
         if (event.shiftKey) {

@@ -49,6 +49,8 @@ function makeActions(over: Partial<TaskActions> = {}): TaskActions {
     insertAfter: vi.fn().mockResolvedValue(null),
     editAndComplete: vi.fn(),
     schedule: vi.fn(),
+    convertToBullet: vi.fn(),
+    editAndConvertToBullet: vi.fn(),
     archive: vi.fn(),
     isPending: false,
     ...over,
@@ -81,6 +83,7 @@ function mount(options: {
   const scrollToKey = vi.fn()
   const onToggleFilters = vi.fn()
   const onToggleSchedule = vi.fn()
+  const onConvertToBullet = vi.fn()
   renderHook(() =>
     useTaskKeyboard({
       selection,
@@ -94,9 +97,10 @@ function mount(options: {
       scrollToKey,
       onToggleFilters,
       onToggleSchedule,
+      onConvertToBullet,
     }),
   )
-  return { selection, actions, setQuery, scrollToKey, onToggleFilters, onToggleSchedule }
+  return { selection, actions, setQuery, scrollToKey, onToggleFilters, onToggleSchedule, onConvertToBullet }
 }
 
 /** Let the `void insert(...).then(...)` microtask settle before asserting. */
@@ -180,6 +184,31 @@ describe('useTaskKeyboard', () => {
     const selEvent = press(root, 's', { metaKey: true, shiftKey: true })
     expect(withSel.onToggleSchedule).toHaveBeenCalledTimes(1)
     expect(selEvent.defaultPrevented).toBe(true)
+  })
+
+  it('converts the selection to bullets on ⌘⇧K only when something is selected', () => {
+    const withNone = mount({ selection: makeSelection({ selectedCount: 0 }) })
+    const noneEvent = press(root, 'k', { metaKey: true, shiftKey: true })
+    expect(withNone.onConvertToBullet).not.toHaveBeenCalled()
+    expect(noneEvent.defaultPrevented).toBe(false)
+
+    const withSel = mount({ selection: makeSelection({ selectedCount: 2 }) })
+    const selEvent = press(root, 'k', { metaKey: true, shiftKey: true })
+    expect(withSel.onConvertToBullet).toHaveBeenCalledTimes(1)
+    expect(selEvent.defaultPrevented).toBe(true)
+  })
+
+  it('backs off ⌘⇧K while the inline editor is focused (it handles convert itself)', () => {
+    const editor = document.createElement('div')
+    editor.setAttribute('data-task-editor', '')
+    root.appendChild(editor)
+    const selection = makeSelection({ selected: new Set(['k']), selectedCount: 1 })
+    const { onConvertToBullet } = mount({ selection, tasksByKey: new Map([['k', task()]]) })
+
+    press(editor, 'k', { metaKey: true, shiftKey: true })
+    // The editor's own keymap flushes the draft then converts — the screen handler
+    // must not also fire (that's the data-loss race Bugbot flagged).
+    expect(onConvertToBullet).not.toHaveBeenCalled()
   })
 
   it('plain ⌫ removes a single empty row and selects the previous (V1)', () => {

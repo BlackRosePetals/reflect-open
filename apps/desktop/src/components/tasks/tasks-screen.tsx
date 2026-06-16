@@ -1,7 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Archive, CalendarClock, Search } from 'lucide-react'
-import { getCompletedTasks, getOpenTasks, groupTasks, hasBridge, type TaskGroup } from '@reflect/core'
+import { Archive, CalendarClock, List, Search } from 'lucide-react'
+import {
+  getCompletedTasks,
+  getOpenTasks,
+  groupTasks,
+  hasBridge,
+  type OpenTask,
+  type TaskGroup,
+} from '@reflect/core'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { useRecentlyCompleted } from '@/lib/tasks/recently-completed'
@@ -157,17 +164,40 @@ export function TasksScreen(): ReactElement {
     },
     [actions, selection, scrollToKey],
   )
+  // The tasks behind the current selection's keys, in selection order — what the
+  // toolbar actions (schedule, convert) act on. A row whose key no longer
+  // resolves (pruned by a reindex) is dropped rather than acted on.
+  const selectedTasks = useCallback(
+    (): OpenTask[] =>
+      [...selection.selected]
+        .map((key) => tasksByKey.get(key))
+        .filter((task): task is OpenTask => task !== undefined),
+    [selection, tasksByKey],
+  )
   // Schedule the current selection (the calendar / ⌘⇧S), then deselect (V1).
   const onSchedule = useCallback(
     (isoDate: string | null) => {
-      const tasks = [...selection.selected]
-        .map((key) => tasksByKey.get(key))
-        .filter((task): task is NonNullable<typeof task> => task !== undefined)
-      actions.schedule(tasks, isoDate)
+      actions.schedule(selectedTasks(), isoDate)
       selection.clear()
     },
-    [actions, selection, tasksByKey],
+    [actions, selection, selectedTasks],
   )
+  // Convert the current selection to plain bullets (the toolbar / ⌘⇧K): the rows
+  // leave the Tasks view, so deselect after, like scheduling. When a single row is
+  // being inline-edited it holds a flush-then-convert trigger here — route through
+  // it so the unsaved draft is saved first, never written stale by the convert
+  // landing ahead of the editor's commit (the keyboard ⌘⇧K hits the editor's own
+  // keymap; this covers the toolbar button and an unfocused sole selection).
+  const convertControllerRef = useRef<(() => void) | null>(null)
+  const onConvertToBullet = useCallback(() => {
+    const convertEditing = convertControllerRef.current
+    if (convertEditing !== null) {
+      convertEditing()
+    } else {
+      actions.convertToBullet(selectedTasks())
+      selection.clear()
+    }
+  }, [actions, selection, selectedTasks])
   useTaskKeyboard({
     selection,
     actions,
@@ -180,6 +210,7 @@ export function TasksScreen(): ReactElement {
     scrollToKey,
     onToggleFilters: () => setFiltersOpen((open) => !open),
     onToggleSchedule: () => setScheduleOpen((open) => !open),
+    onConvertToBullet,
   })
 
   // Move focus into the Tasks surface on mount so the shortcuts work the moment
@@ -223,6 +254,18 @@ export function TasksScreen(): ReactElement {
             </Button>
           </TaskScheduleCalendar>
         ) : null}
+        {selection.selectedCount > 0 ? (
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={onConvertToBullet}
+            title="Drop the checkbox, keeping the line as a plain bullet — leaves the Tasks list"
+            className="font-normal text-text-muted"
+          >
+            <List aria-hidden className="size-4" />
+            Convert to bullet ({selection.selectedCount})
+          </Button>
+        ) : null}
         {recentlyCompleted.length > 0 ? (
           <Button type="button" variant="ghost" onClick={actions.archive} className="font-normal text-text-muted">
             <Archive aria-hidden className="size-4" />
@@ -258,6 +301,7 @@ export function TasksScreen(): ReactElement {
               editHandlers={editHandlers}
               today={today}
               onAdd={onAdd}
+              convertControllerRef={convertControllerRef}
               onOpen={(path) => navigate(routeForPath(path))}
             />
           ))
