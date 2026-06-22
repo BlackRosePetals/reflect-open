@@ -84,7 +84,7 @@ export function GraphFooter({ graph, context }: GraphFooterProps): ReactElement 
                   color={colorFor(graph.root)}
                   className={cn('h-5 w-5', indexing && 'motion-safe:animate-pulse')}
                 />
-                <span className="min-w-0 truncate text-xs font-medium text-text">
+                <span className="min-w-0 truncate text-xs font-medium text-text-secondary">
                   {graph.name}
                 </span>
                 {dot !== null ? (
@@ -164,7 +164,7 @@ export function GraphFooter({ graph, context }: GraphFooterProps): ReactElement 
             className={MENU_ITEM_CLASS}
           >
             <LocateFixed aria-hidden strokeWidth={1.75} className="size-3.5 shrink-0" />
-            <span className="min-w-0 flex-1 truncate">Open graph in Finder</span>
+            <span className="min-w-0 flex-1 truncate">Reveal graph in Finder</span>
           </DropdownMenuItem>
           <DropdownMenuItem
             onSelect={() => void pickAndOpen()}
