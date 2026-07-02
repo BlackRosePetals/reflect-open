@@ -9,10 +9,17 @@ import {
 } from 'react'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { errorMessage } from '@reflect/core'
-import { type ExitBoundaryHandler, type MarkMode } from '@meowdown/core'
+import {
+  type AcceptPendingReplacementOptions,
+  type ExitBoundaryHandler,
+  type MarkMode,
+  type StartPendingReplacementOptions,
+} from '@meowdown/core'
 import {
   MeowdownEditor,
   type EditorHandle,
+  type PendingReplacementResolveHandler,
+  type SelectionMenuSearchHandler,
   type SlashMenuSearchHandler,
   type TagSearchHandler,
   type WikilinkSearchHandler,
@@ -61,6 +68,18 @@ export interface NoteEditorHandle {
    * previous day / the start of the next day).
    */
   setSelection(position: 'start' | 'end'): void
+  /** The current selection's text (blocks separated by blank lines). */
+  getSelectedText(): string
+  /** Open the selection AI menu (no-op on an empty selection). */
+  openSelectionMenu(): void
+  /** Stage a pending replacement over a range; false when the range is invalid. */
+  startPendingReplacement(options: StartPendingReplacementOptions): boolean
+  /** Append streamed text to the staged replacement's preview. */
+  appendPendingReplacementText(text: string): void
+  /** Apply the staged replacement as one edit; `mode` overrides its placement. */
+  acceptPendingReplacement(options?: AcceptPendingReplacementOptions): void
+  /** Clear the staged replacement without touching the document. */
+  discardPendingReplacement(): void
 }
 
 interface NoteEditorProps {
@@ -107,6 +126,15 @@ interface NoteEditorProps {
   onWikilinkSearch?: WikilinkSearchHandler
   /** Search tags for the `#` autocomplete menu. */
   onTagSearch?: TagSearchHandler
+  /**
+   * Search prompts for the selection AI menu. Omitting it disables the menu
+   * and its selection affordance entirely (e.g. for `private: true` notes).
+   */
+  onSelectionMenuSearch?: SelectionMenuSearchHandler
+  /** Extra controls in the pending-replacement preview footer (e.g. Retry). */
+  pendingReplacementActions?: ReactNode
+  /** Called when a staged replacement is accepted or discarded. */
+  onPendingReplacementResolve?: PendingReplacementResolveHandler
   /** Host rows for the `/` insert menu (note templates). */
   onSlashMenuSearch?: SlashMenuSearchHandler
   /** Handler when pressing ArrowUp/ArrowDown at the document edge. */
@@ -147,6 +175,9 @@ export function NoteEditor({
   onTagClick,
   onWikilinkSearch,
   onTagSearch,
+  onSelectionMenuSearch,
+  pendingReplacementActions,
+  onPendingReplacementResolve,
   onSlashMenuSearch,
   onExitBoundary,
   children,
@@ -194,6 +225,14 @@ export function NoteEditor({
       insertMarkdown: (markdown) => innerRef.current?.insertMarkdown(markdown),
       focus: () => innerRef.current?.focus(),
       setSelection: (position) => innerRef.current?.setSelection(position),
+      getSelectedText: () => innerRef.current?.getSelectedText() ?? '',
+      openSelectionMenu: () => innerRef.current?.openSelectionMenu(),
+      startPendingReplacement: (options) =>
+        innerRef.current?.startPendingReplacement(options) ?? false,
+      appendPendingReplacementText: (text) =>
+        innerRef.current?.appendPendingReplacementText(text),
+      acceptPendingReplacement: (options) => innerRef.current?.acceptPendingReplacement(options),
+      discardPendingReplacement: () => innerRef.current?.discardPendingReplacement(),
     }),
     [],
   )
@@ -291,6 +330,9 @@ export function NoteEditor({
         onImageClick={handleImageClick}
         {...(onWikilinkSearch !== undefined ? { onWikilinkSearch } : {})}
         {...(onTagSearch !== undefined ? { onTagSearch } : {})}
+        {...(onSelectionMenuSearch !== undefined ? { onSelectionMenuSearch } : {})}
+        {...(pendingReplacementActions !== undefined ? { pendingReplacementActions } : {})}
+        {...(onPendingReplacementResolve !== undefined ? { onPendingReplacementResolve } : {})}
         {...(onSlashMenuSearch !== undefined ? { onSlashMenuSearch } : {})}
         resolveImageUrl={handleResolveImageUrl}
         onFilePaste={handleFilePaste}

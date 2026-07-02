@@ -7,6 +7,8 @@ import { NoteConflictBanner } from '@/components/note-conflict-banner'
 import { ProtectedNoteView } from '@/components/protected-note-view'
 import { SuggestedContactCard } from '@/components/suggested-contact-card'
 import { SyncConflictNotice } from '@/components/sync-conflict-notice'
+import { EditorAiKeymap } from '@/editor/ai-menu/editor-ai-keymap'
+import { useEditorAiMenu } from '@/editor/ai-menu/use-editor-ai-menu'
 import { editorBodyWithDefaultBullet } from '@/editor/default-bullet'
 import {
   registerNoteEditorHandle,
@@ -144,6 +146,7 @@ export function NotePaneComponent({
   const { onWikilinkSearch, onTagSearch } = useEditorAutocomplete()
 
   const bindEditor = document.bindEditor
+  const aiEditorRef = useRef<NoteEditorHandle | null>(null)
   // The registry entry this pane made, so unmount removes exactly it (a
   // remount of the same path may already have re-registered).
   const registeredHandle = useRef<{ path: string; handle: NoteEditorHandle } | null>(null)
@@ -156,6 +159,7 @@ export function NotePaneComponent({
   const handleRef = useCallback(
     (handle: NoteEditorHandle | null) => {
       bindEditor(handle)
+      aiEditorRef.current = handle
       if (handle === null) {
         if (registeredHandle.current !== null) {
           unregisterNoteEditorHandle(
@@ -180,6 +184,12 @@ export function NotePaneComponent({
     },
     [bindEditor, path, dailyDate, registerHandle, autoFocus, onAutoFocused],
   )
+
+  const aiMenu = useEditorAiMenu({
+    path,
+    sessionEpoch: document.sessionEpoch,
+    editorRef: aiEditorRef,
+  })
 
 
   const handleExitBoundary: ExitBoundaryHandler | undefined = useMemo(() => {
@@ -299,6 +309,11 @@ export function NotePaneComponent({
         onTagClick={onTagClick}
         onWikilinkSearch={onWikilinkSearch}
         onTagSearch={onTagSearch}
+        {...(aiMenu.onSelectionMenuSearch !== undefined
+          ? { onSelectionMenuSearch: aiMenu.onSelectionMenuSearch }
+          : {})}
+        pendingReplacementActions={aiMenu.pendingReplacementActions}
+        onPendingReplacementResolve={aiMenu.onPendingReplacementResolve}
         onSlashMenuSearch={onSlashMenuSearch}
         // Daily notes carry no title semantics (the date is their subject),
         // so an empty leading H1 there is just an empty heading.
@@ -309,7 +324,9 @@ export function NotePaneComponent({
         className={cn('reflect-note-surface', gutterClassName, editorClassName)}
         handleRef={handleRef}
         onExitBoundary={handleExitBoundary}
-      />
+      >
+        <EditorAiKeymap onTrigger={aiMenu.openMenu} />
+      </NoteEditor>
 
       <div className={gutterClassName}>
         <BacklinksPanel path={path} />

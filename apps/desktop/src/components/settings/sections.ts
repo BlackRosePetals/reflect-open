@@ -13,6 +13,7 @@ export const SETTINGS_SECTIONS = [
   { id: 'calendar', title: 'Calendar' },
   { id: 'backup', title: 'Backup' },
   { id: 'ai-providers', title: 'AI providers' },
+  { id: 'ai-prompts', title: 'AI prompts' },
   // Only shown where the OS frameworks exist — see use-visible-settings-sections.
   { id: 'integrations', title: 'System integrations' },
   { id: 'keyboard', title: 'Keyboard shortcuts' },

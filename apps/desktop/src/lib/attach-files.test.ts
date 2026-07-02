@@ -41,6 +41,12 @@ function editorHandle(): NoteEditorHandle & {
     insertMarkdown: vi.fn<(markdown: string) => void>(),
     focus: () => {},
     setSelection: () => {},
+    getSelectedText: () => '',
+    openSelectionMenu: () => {},
+    startPendingReplacement: () => false,
+    appendPendingReplacementText: () => {},
+    acceptPendingReplacement: () => {},
+    discardPendingReplacement: () => {},
   }
 }
 

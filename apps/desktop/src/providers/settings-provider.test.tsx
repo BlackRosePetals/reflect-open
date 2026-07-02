@@ -148,6 +148,7 @@ describe('SettingsProvider', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -211,6 +212,7 @@ describe('SettingsProvider', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
           futureKey: true,
         },
       ]),
@@ -259,6 +261,7 @@ describe('SettingsProvider', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
           futureKey: true,
         },
       ]),
@@ -301,6 +304,7 @@ describe('SettingsProvider', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -469,6 +473,7 @@ describe('SettingsProvider', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -514,6 +519,7 @@ describe('SettingsProvider', () => {
         aiProviders: [],
         defaultAiProviderId: null,
         chatModelSelection: null,
+        aiPrompts: [],
       },
     ])
   })

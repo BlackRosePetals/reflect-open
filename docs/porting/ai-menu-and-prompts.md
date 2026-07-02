@@ -1,9 +1,13 @@
 # Porting the AI menu and prompts
 
-**Status: planned.** v2 has the ⌘J copilot (chat grounded in your notes) but
-no way to act on **selected text** inside the editor. This doc plans that
-port: select text, pick a prompt ("Fix spelling and grammar", "Write a short
-summary", or one you saved), and the transformation streams in.
+**Status: implemented.** The meowdown primitives (selection command menu +
+pending-replacement preview) shipped upstream via
+[prosekit/meowdown#191](https://github.com/prosekit/meowdown/pull/191),
+released in meowdown 0.33.0. Select text and press ⌘⇧J (or the sparkle
+affordance on the selection), pick a prompt ("Fix spelling and grammar",
+"Write a short summary", or one saved in Settings → AI prompts), and the
+transformation streams into a preview with Accept / Discard / Retry (with a
+one-shot model switch).
 
 ## What v1 did
 
@@ -15,20 +19,26 @@ summary", or one you saved), and the transformation streams in.
 - Provider choice (Anthropic / OpenAI / Google) with bundled metered access;
   personal API keys lifted the quotas.
 
-## How it will work in v2
+## How it works in v2
 
 ### User experience
 
 1. Select text in a note and invoke the AI menu — via a keyboard shortcut
    registered in the editor keymap, and via a small affordance on the
    selection.
-2. A picker lists prompts: a curated built-in set (the most-used v1
-   transformations — fix grammar, summarize, rephrase, simplify, continue
-   writing, list action items) followed by the user's saved prompts, with
-   fuzzy filtering.
+2. A picker lists prompts: the user's saved prompts first (v1's order), then
+   a curated built-in set carrying v1's battle-tested bodies (fix grammar,
+   copy editor, rephrase, simplify, format paragraphs, short summary, key
+   takeaways, action items, points to document, next paragraph, decorate
+   with backlinks), with label filtering. Typed text that matches nothing is
+   itself runnable as a one-off prompt (v1's "Ask anything to AI"). The rest
+   of v1's 23 (tweets, blog posts, emails, outlines…) stay unported — any of
+   them can be recreated verbatim as a saved prompt.
 3. The result streams into view with explicit **Accept / Discard / Retry**
-   controls. Nothing is written to the markdown file until the user accepts;
-   a discarded run leaves the note byte-identical.
+   controls, plus the alternate placement (v1's Replace-vs-Insert choice:
+   "Insert below" on a replace prompt, "Replace selection" on an append
+   one). Nothing is written to the markdown file until the user accepts; a
+   discarded run leaves the note byte-identical.
 4. Saved prompts are managed in **Settings → AI**, next to the provider
    configuration that already exists. A prompt has a label and a body with a
    `{{selectedText}}` placeholder (same syntax as v1, so saved v1 prompts
@@ -79,12 +89,13 @@ The work splits cleanly along the existing seams:
 - Automatic context beyond the selection (unchanged from v1: prompts see the
   selection only; broader context is the copilot's job).
 
-## Open questions
+## Resolved questions
 
-- Whether the picker is a dedicated selection popover or a filtered mode of
-  the command palette (`mod+k`) — leaning popover, since the palette closes
-  over the editor and loses the selection visual.
-- Whether "Retry" offers a one-shot model switch (cheap to add given the
-  provider catalog, but more UI).
-- Ordering between the meowdown release and the app work — the meowdown
-  primitives land first and independently.
+- The picker is a dedicated selection popover, not a command-palette mode —
+  the palette closes over the editor and loses the selection visual.
+- "Retry" does offer a one-shot model switch (`AiPreviewActions` renders a
+  model dropdown next to Retry, listing the configured providers' catalogs;
+  the pick applies to that retry only).
+- The meowdown primitives landed first ([prosekit/meowdown#191](https://github.com/prosekit/meowdown/pull/191),
+  released in 0.33.0); the app depended on pkg.pr.new snapshots of the PR
+  during development and now uses the plain npm release.

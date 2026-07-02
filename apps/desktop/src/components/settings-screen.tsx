@@ -1,5 +1,6 @@
 import type { ReactElement } from 'react'
 import { AboutSection } from './settings/about-section'
+import { AiPromptsSection } from './settings/ai-prompts-section'
 import { AiProvidersSection } from './settings/ai-providers-section'
 import { AllNotesSection } from './settings/all-notes-section'
 import { AppearanceSection } from './settings/appearance-section'
@@ -32,6 +33,7 @@ export function SettingsScreen(): ReactElement {
         <CalendarSection />
         <BackupSection />
         <AiProvidersSection />
+        <AiPromptsSection />
         <IntegrationsSection />
         <KeyboardSection />
         <AboutSection />

@@ -177,6 +177,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -220,6 +221,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -266,6 +268,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -310,6 +313,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -353,6 +357,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -389,6 +394,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -438,6 +444,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -480,6 +487,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -528,6 +536,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -573,6 +582,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -609,6 +619,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -677,6 +688,7 @@ describe('SettingsScreen', () => {
           aiProviders: [],
           defaultAiProviderId: null,
           chatModelSelection: null,
+          aiPrompts: [],
         },
       ]),
     )
@@ -690,7 +702,7 @@ describe('SettingsScreen', () => {
 
     await waitFor(() =>
       expect(saved).toEqual([
-        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: true, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null },
+        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: true, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null, aiPrompts: [] },
       ]),
     )
     // The control flips to the loading state (EmbeddingsSync owns the actual
@@ -719,7 +731,7 @@ describe('SettingsScreen', () => {
 
     await waitFor(() =>
       expect(saved).toEqual([
-        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: false, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null },
+        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: false, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null, aiPrompts: [] },
       ]),
     )
     expect(screen.getByRole('button', { name: /enable semantic search/i })).toBeTruthy()
@@ -742,7 +754,7 @@ describe('SettingsScreen', () => {
     await waitFor(() => expect(invoked).toContain('embed_ensure'))
     await waitFor(() =>
       expect(saved).toEqual([
-        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: true, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null },
+        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: true, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null, aiPrompts: [] },
       ]),
     )
   })
@@ -761,7 +773,7 @@ describe('SettingsScreen', () => {
 
     await waitFor(() =>
       expect(saved).toEqual([
-        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: false, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null },
+        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: false, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null, aiPrompts: [] },
       ]),
     )
     expect(screen.getByRole('button', { name: /enable semantic search/i })).toBeTruthy()
@@ -792,10 +804,79 @@ describe('SettingsScreen', () => {
 
   it('lists registered shortcuts from both keymap scopes', () => {
     renderScreen()
-    // App scope (command titles) and editor scope (binding descriptions).
+    // App scope (command titles) and editor scope (binding descriptions) —
+    // including Reflect's own editor bindings, not just meowdown's.
     expect(screen.getByText('Toggle sidebar')).toBeTruthy()
     expect(screen.getByText('Go to today')).toBeTruthy()
     expect(screen.getByText('Bold')).toBeTruthy()
     expect(screen.getByText('Heading 1')).toBeTruthy()
+    expect(screen.getByText('Open the AI menu on the selection')).toBeTruthy()
+  })
+
+  it('adding an AI prompt persists the full document', async () => {
+    renderScreen()
+    const section = screen.getByRole('region', { name: 'AI prompts' })
+
+    fireEvent.click(within(section).getByRole('button', { name: /add prompt/i }))
+    const dialog = screen.getByRole('dialog', { name: /add prompt/i })
+    fireEvent.change(within(dialog).getByPlaceholderText('Translate to French'), {
+      target: { value: 'Translate to French' },
+    })
+    fireEvent.change(within(dialog).getByPlaceholderText(/Translate the following/), {
+      target: { value: 'Translate to French.\n\n{{selectedText}}' },
+    })
+    fireEvent.submit(within(dialog).getByRole('button', { name: /add prompt/i }))
+
+    await waitFor(() =>
+      expect(saved).toEqual([
+        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: false, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null, aiPrompts: [{ id: expect.any(String), label: 'Translate to French', body: 'Translate to French.\n\n{{selectedText}}', mode: 'replace' }] },
+      ]),
+    )
+    expect(within(section).getByText('Translate to French')).toBeTruthy()
+  })
+
+  it('removing a saved AI prompt persists the emptied list', async () => {
+    stored = {
+      aiPrompts: [
+        { id: 'p1', label: 'Translate to French', body: '{{selectedText}}', mode: 'replace' },
+      ],
+    }
+    renderScreen()
+    const section = screen.getByRole('region', { name: 'AI prompts' })
+    const remove = await within(section).findByRole('button', {
+      name: /remove translate to french/i,
+    })
+
+    fireEvent.click(remove)
+
+    await waitFor(() =>
+      expect(saved).toEqual([
+        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: false, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null, aiPrompts: [] },
+      ]),
+    )
+  })
+
+  it('editing a saved AI prompt persists the change', async () => {
+    stored = {
+      aiPrompts: [
+        { id: 'p1', label: 'Translate to French', body: '{{selectedText}}', mode: 'replace' },
+      ],
+    }
+    renderScreen()
+    const section = screen.getByRole('region', { name: 'AI prompts' })
+    const edit = await within(section).findByRole('button', { name: /edit translate to french/i })
+
+    fireEvent.click(edit)
+    const dialog = screen.getByRole('dialog', { name: /edit prompt/i })
+    fireEvent.change(within(dialog).getByPlaceholderText('Translate to French'), {
+      target: { value: 'Translate to German' },
+    })
+    fireEvent.submit(within(dialog).getByRole('button', { name: /^save$/i }))
+
+    await waitFor(() =>
+      expect(saved).toEqual([
+        { editorMarkdownSyntax: 'hide', editorSpellCheck: true, editorDefaultBullet: true, editorBulletAfterHeading: true, editorTextSize: 'small', semanticSearchEnabled: false, describeAssets: true, contactsEnabled: false, mobileOnboarded: false, theme: 'system', timeFormat: '12h', dateFormat: 'mdy', weekStartDay: 'monday', allNotesFilterTags: ['book', 'link', 'person'], calendarEnabled: false, calendarIds: [], graphColors: {}, aiProviders: [], defaultAiProviderId: null, chatModelSelection: null, aiPrompts: [{ id: 'p1', label: 'Translate to German', body: '{{selectedText}}', mode: 'replace' }] },
+      ]),
+    )
   })
 })
