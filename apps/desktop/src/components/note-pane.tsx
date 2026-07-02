@@ -5,6 +5,7 @@ import { BacklinksPanel } from '@/components/backlinks-panel'
 import { InlineAlert } from '@/components/inline-alert'
 import { NoteConflictBanner } from '@/components/note-conflict-banner'
 import { ProtectedNoteView } from '@/components/protected-note-view'
+import { SuggestedContactCard } from '@/components/suggested-contact-card'
 import { SyncConflictNotice } from '@/components/sync-conflict-notice'
 import { editorBodyWithDefaultBullet } from '@/editor/default-bullet'
 import {
@@ -257,6 +258,12 @@ export function NotePaneComponent({
         ) : null}
 
         <SyncConflictNotice path={path} className="mb-4" />
+
+        {/* Daily notes are date-titled, so a contact can never match one —
+            the hook gates on it, and skipping the mount keeps the stream lean.
+            Keyed by path: a note switch must not carry one card's busy/error
+            state into the next note's card. */}
+        {!dailyNote ? <SuggestedContactCard key={path} path={path} /> : null}
       </div>
 
       <NoteEditor

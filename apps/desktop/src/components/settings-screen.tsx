@@ -8,6 +8,7 @@ import { CalendarSection } from './settings/calendar-section'
 import { DateTimeSection } from './settings/date-time-section'
 import { DestructiveSection } from './settings/destructive-section'
 import { EditorSection } from './settings/editor-section'
+import { IntegrationsSection } from './settings/integrations-section'
 import { KeyboardSection } from './settings/keyboard-section'
 import { SearchSection } from './settings/search-section'
 
@@ -29,6 +30,7 @@ export function SettingsScreen(): ReactElement {
         <CalendarSection />
         <BackupSection />
         <AiProvidersSection />
+        <IntegrationsSection />
         <KeyboardSection />
         <AboutSection />
         <DestructiveSection />
