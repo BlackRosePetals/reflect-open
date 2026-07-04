@@ -141,6 +141,28 @@ export const describeAssetsSchema = z.boolean().catch(true)
 export const mobileOnboardedSchema = z.boolean().catch(false)
 
 /**
+ * Which storage root the mobile graph lives in (Plan 21): the app's iCloud
+ * Drive container (`'icloud'` — the recommended default offered first during
+ * onboarding, syncs across devices) or the app-sandbox Documents directory
+ * (`'local'` — this device only, and the home of GitHub-cloned graphs).
+ * Defaults to `'local'` so installs onboarded before this key existed keep
+ * opening the root they already use. Only the *kind* is persisted — absolute
+ * container paths change across restore/update and are re-derived every
+ * launch. Mobile-only; desktop never reads it.
+ */
+export const mobileStorageKindSchema = z.enum(['icloud', 'local']).catch('local')
+
+/**
+ * The *name* of the iCloud graph the mobile app has open (the container
+ * `Documents/` subdirectory name) — the persisted selector now that the
+ * container can hold several graphs. A name, never a path: container paths
+ * change across restore/update and are re-derived every launch. Empty means
+ * "not chosen yet" — launch falls back to the first graph in the container.
+ * Only read when `mobileStorage` is `'icloud'`. Mobile-only.
+ */
+export const mobileGraphNameSchema = z.string().catch('')
+
+/**
  * Whether the Apple Contacts integration is on. Off by default — turning it
  * on triggers the OS contacts permission prompt. Lookups are live, on-demand
  * `CNContactStore` queries (attendee resolution, suggested-contact cards);
@@ -331,6 +353,8 @@ export const settingsSchema = z
     describeAssets: describeAssetsSchema,
     contactsEnabled: contactsEnabledSchema,
     mobileOnboarded: mobileOnboardedSchema,
+    mobileStorage: mobileStorageKindSchema,
+    mobileGraphName: mobileGraphNameSchema,
     theme: themePreferenceSchema,
     timeFormat: timeFormatSchema,
     dateFormat: dateFormatSchema,

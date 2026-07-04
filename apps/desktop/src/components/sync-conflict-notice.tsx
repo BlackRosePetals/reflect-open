@@ -1,6 +1,12 @@
 import { type ReactElement } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getNote, hasBridge } from '@reflect/core'
+import {
+  conflictMarkerBlockCount,
+  conflictMarkerLabels,
+  getNote,
+  hasBridge,
+  readNote,
+} from '@reflect/core'
 import { InlineAlert } from '@/components/inline-alert'
 import { Button } from '@/components/ui/button'
 import { useConflictResolution } from '@/hooks/use-conflict-resolution'
@@ -41,10 +47,30 @@ export function SyncConflictNotice({ path, className }: SyncConflictNoticeProps)
     queryFn: async () => (await getNote(path)) ?? null,
     enabled: hasBridge() && graph !== null,
   })
+  const hasConflict = data?.hasConflict === true
+  // The iCloud sweep labels marker sides with real device names (or the two
+  // colliding filenames) — read them so the buttons say what they keep. The
+  // Git path's generic `this device`/`other device` keeps the classic copy.
+  // A multi-block note (three-plus devices, Plan 21) pluralizes: `theirs`
+  // splices in every non-first side, so naming a single device would lie.
+  const { data: markerInfo } = useQuery({
+    queryKey: [INDEX_QUERY_SCOPE, 'note-conflict-labels', graph?.root, path],
+    queryFn: async () => {
+      const source = await readNote(path)
+      return {
+        labels: conflictMarkerLabels(source),
+        blocks: conflictMarkerBlockCount(source),
+      }
+    },
+    enabled: hasBridge() && graph !== null && hasConflict,
+  })
 
-  if (data == null || !data.hasConflict || graph === null) {
+  if (data == null || !hasConflict || graph === null) {
     return null
   }
+  const labels = markerInfo?.labels ?? null
+  const manySided = (markerInfo?.blocks ?? 0) > 1
+  const named = labels != null && labels.ours !== 'this device'
 
   if (isMobileSurface()) {
     return (
@@ -64,13 +90,17 @@ export function SyncConflictNotice({ path, className }: SyncConflictNoticeProps)
       </p>
       <div className="mt-2 flex flex-wrap gap-2">
         <Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve('ours')}>
-          Keep this device’s version
+          {named ? `Keep “${labels.ours}”` : 'Keep this device’s version'}
         </Button>
         <Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve('theirs')}>
-          Keep the other device’s
+          {manySided
+            ? 'Keep the other versions'
+            : named
+              ? `Keep “${labels.theirs}”`
+              : 'Keep the other device’s'}
         </Button>
         <Button size="xs" variant="outline" disabled={busy} onClick={() => void resolve('both')}>
-          Keep both
+          {manySided ? 'Keep all' : 'Keep both'}
         </Button>
       </div>
       {error !== null ? <p className="mt-2">Couldn’t resolve: {error}</p> : null}

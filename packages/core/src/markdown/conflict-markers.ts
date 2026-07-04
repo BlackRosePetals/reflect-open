@@ -54,6 +54,83 @@ export function resolveConflictMarkers(source: string, keep: ConflictResolution)
   return out.join('\n')
 }
 
+/**
+ * The two side labels of the first complete conflict block. Git sync labels
+ * sides `this device` / `other device`; the iCloud sweep (Plan 21) labels
+ * them with real device names (`Alex's MacBook Pro`) or, for creation
+ * collisions, the two filenames the content came from. The resolution notice
+ * uses these so its buttons say what they actually keep.
+ */
+export interface ConflictMarkerLabels {
+  /** The first side — what {@link resolveConflictMarkers} keeps for `ours`. */
+  readonly ours: string
+  /** The second side — kept for `theirs`. */
+  readonly theirs: string
+}
+
+/**
+ * Parse the side labels out of `source`'s first complete conflict block, or
+ * `null` when there is none. Same in-order sequence rule as
+ * {@link detectConflictMarkers}, so a note that "has a conflict" always has
+ * labels.
+ */
+export function conflictMarkerLabels(source: string): ConflictMarkerLabels | null {
+  let ours: string | null = null
+  let sawSeparator = false
+  for (const rawLine of source.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    if (ours === null) {
+      if (line.startsWith('<<<<<<< ')) {
+        ours = line.slice('<<<<<<< '.length).trim()
+      }
+    } else if (!sawSeparator) {
+      if (line === '=======') {
+        sawSeparator = true
+      }
+    } else if (line.startsWith('>>>>>>> ')) {
+      const theirs = line.slice('>>>>>>> '.length).trim()
+      if (ours.length > 0 && theirs.length > 0) {
+        return { ours, theirs }
+      }
+      return null
+    }
+  }
+  return null
+}
+
+/**
+ * How many complete conflict blocks `source` carries. The iCloud sweep's
+ * three-plus-way folds stack one block per extra side (Plan 21), and the
+ * resolution notice pluralizes its buttons past one block — `theirs` keeps
+ * every non-first side, not a single device's.
+ */
+export function conflictMarkerBlockCount(source: string): number {
+  let count = 0
+  let stage: 'start' | 'separator' | 'end' = 'start'
+  for (const rawLine of source.split('\n')) {
+    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    switch (stage) {
+      case 'start':
+        if (line.startsWith('<<<<<<< ')) {
+          stage = 'separator'
+        }
+        break
+      case 'separator':
+        if (line === '=======') {
+          stage = 'end'
+        }
+        break
+      case 'end':
+        if (line.startsWith('>>>>>>> ')) {
+          count += 1
+          stage = 'start'
+        }
+        break
+    }
+  }
+  return count
+}
+
 /** True when `source` contains a complete Git conflict-marker block. */
 export function detectConflictMarkers(source: string): boolean {
   let stage: 'start' | 'separator' | 'end' = 'start'

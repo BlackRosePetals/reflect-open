@@ -25,13 +25,22 @@ let storedRecents: Array<{ root: string; name: string; openedMs: number }>
 let storedFiles: Array<{ path: string; size: number; modifiedMs: number }>
 /** The fake `index_meta` table (the welcome marker lives here). */
 let metaStore: Record<string, string>
-/** The fake settings document (`mobileOnboarded` lives here). */
+/** The fake settings document (`mobileOnboarded`/`mobileStorage` live here). */
 let settingsStore: Record<string, unknown>
+/** What the fake `mobile_storage` resolves to — set before render. */
+let storedStorage: {
+  localRoot: string
+  icloudDocumentsRoot: string | null
+  icloudGraphRoots: string[]
+}
 /** A fresh QueryClient per test — the settings provider reads through it. */
 let queryClient: QueryClient
 
-/** The fixed mobile graph root the fake `mobile_graph_root` resolves to. */
+/** The fixed mobile roots the fake `mobile_storage` reports. */
 const MOBILE_ROOT = '/Documents'
+const ICLOUD_ROOT = '/iCloud/Documents'
+/** Where a fresh iCloud graph is created when the container is empty. */
+const ICLOUD_GRAPH = `${ICLOUD_ROOT}/Notes`
 
 function installFakeBridge(): void {
   invokeLog = []
@@ -41,6 +50,7 @@ function installFakeBridge(): void {
   storedFiles = []
   metaStore = {}
   settingsStore = {}
+  storedStorage = { localRoot: MOBILE_ROOT, icloudDocumentsRoot: ICLOUD_ROOT, icloudGraphRoots: [] }
   let generation = 0
   setBridge({
     invoke: async (command, args) => {
@@ -62,8 +72,8 @@ function installFakeBridge(): void {
         case 'forget_recent':
           storedRecents = storedRecents.filter((recent) => recent.root !== String(args['root']))
           return null
-        case 'mobile_graph_root':
-          return MOBILE_ROOT
+        case 'mobile_storage':
+          return storedStorage
         case 'settings_load':
           return settingsStore
         case 'settings_save':
@@ -242,25 +252,31 @@ describe('GraphProvider welcome seeding', () => {
   })
 })
 
-describe('GraphProvider mobile onboarding (Plan 19, step 6)', () => {
-  it('defers opening the fixed root and shows onboarding on a fresh install', async () => {
+describe('GraphProvider mobile onboarding (Plans 19/21)', () => {
+  it('defers opening the fixed roots and shows onboarding on a fresh install', async () => {
     const { result } = renderHook(() => useGraph(), { wrapper: mobileWrapper })
 
     await waitFor(() => expect(result.current.needsOnboarding).toBe(true))
     expect(result.current.status).toBe('choosing')
     expect(result.current.graph).toBeNull()
-    expect(result.current.mobileRoot).toBe(MOBILE_ROOT)
-    // The root must stay untouched until the user chooses — the GitHub clone
-    // path needs it empty (`git_clone` refuses a non-empty directory).
+    expect(result.current.mobileStorageInfo).toEqual({
+      localRoot: MOBILE_ROOT,
+      icloudDocumentsRoot: ICLOUD_ROOT,
+      icloudGraphRoots: [],
+    })
+    // The roots must stay untouched until the user chooses — the GitHub clone
+    // path needs the local one empty (`git_clone` refuses a non-empty
+    // directory), and opening the iCloud one would bootstrap + seed it.
     expect(invokeLog).not.toContain(`graph_open:${MOBILE_ROOT}`)
+    expect(invokeLog).not.toContain(`graph_open:${ICLOUD_GRAPH}`)
   })
 
-  it('opens the fixed root and records the flag on completeOnboarding', async () => {
+  it('opens the local root and records flag + kind on completeOnboarding(local)', async () => {
     const { result } = renderHook(() => useGraph(), { wrapper: mobileWrapper })
     await waitFor(() => expect(result.current.needsOnboarding).toBe(true))
 
     await act(async () => {
-      const done = result.current.completeOnboarding()
+      const done = result.current.completeOnboarding('local')
       await waitFor(() => expect(pendingOpens.has(MOBILE_ROOT)).toBe(true))
       resolveOpen(MOBILE_ROOT)
       await done
@@ -269,9 +285,66 @@ describe('GraphProvider mobile onboarding (Plan 19, step 6)', () => {
     await waitFor(() => expect(result.current.status).toBe('ready'))
     expect(result.current.needsOnboarding).toBe(false)
     expect(result.current.graph?.root).toBe(MOBILE_ROOT)
+    expect(result.current.mobileStorageKind).toBe('local')
     // The gate is persisted (through the settings provider) so later launches
     // open the root directly — persistence trails the state update, so wait.
     await waitFor(() => expect(settingsStore['mobileOnboarded']).toBe(true))
+    expect(settingsStore['mobileStorage']).toBe('local')
+  })
+
+  it('creates the default container graph and records kind + name on completeOnboarding(icloud)', async () => {
+    const { result } = renderHook(() => useGraph(), { wrapper: mobileWrapper })
+    await waitFor(() => expect(result.current.needsOnboarding).toBe(true))
+
+    await act(async () => {
+      const done = result.current.completeOnboarding('icloud')
+      await waitFor(() => expect(pendingOpens.has(ICLOUD_GRAPH)).toBe(true))
+      resolveOpen(ICLOUD_GRAPH)
+      await done
+    })
+
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+    expect(result.current.graph?.root).toBe(ICLOUD_GRAPH)
+    expect(result.current.mobileStorageKind).toBe('icloud')
+    await waitFor(() => expect(settingsStore['mobileOnboarded']).toBe(true))
+    expect(settingsStore['mobileStorage']).toBe('icloud')
+    // WHICH graph is remembered by name — never by container path.
+    expect(settingsStore['mobileGraphName']).toBe('Notes')
+  })
+
+  it('opens the explicitly chosen container graph and persists its name', async () => {
+    storedStorage = {
+      localRoot: MOBILE_ROOT,
+      icloudDocumentsRoot: ICLOUD_ROOT,
+      icloudGraphRoots: [`${ICLOUD_ROOT}/Notes`, `${ICLOUD_ROOT}/Work`],
+    }
+    const { result } = renderHook(() => useGraph(), { wrapper: mobileWrapper })
+    await waitFor(() => expect(result.current.needsOnboarding).toBe(true))
+
+    await act(async () => {
+      const done = result.current.completeOnboarding('icloud', `${ICLOUD_ROOT}/Work`)
+      await waitFor(() => expect(pendingOpens.has(`${ICLOUD_ROOT}/Work`)).toBe(true))
+      resolveOpen(`${ICLOUD_ROOT}/Work`)
+      await done
+    })
+
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+    expect(result.current.graph?.root).toBe(`${ICLOUD_ROOT}/Work`)
+    await waitFor(() => expect(settingsStore['mobileGraphName']).toBe('Work'))
+  })
+
+  it('rejects completeOnboarding(icloud) when iCloud is unavailable', async () => {
+    storedStorage = { localRoot: MOBILE_ROOT, icloudDocumentsRoot: null, icloudGraphRoots: [] }
+    const { result } = renderHook(() => useGraph(), { wrapper: mobileWrapper })
+    await waitFor(() => expect(result.current.needsOnboarding).toBe(true))
+
+    await act(async () => {
+      await expect(result.current.completeOnboarding('icloud')).rejects.toThrow(
+        /iCloud Drive isn’t available/,
+      )
+    })
+    expect(result.current.needsOnboarding).toBe(true)
+    expect(settingsStore['mobileOnboarded']).toBeUndefined()
   })
 
   it('keeps onboarding up (flag unset) when the open fails, for an in-app retry', async () => {
@@ -280,7 +353,7 @@ describe('GraphProvider mobile onboarding (Plan 19, step 6)', () => {
 
     failOpens = true
     await act(async () => {
-      await expect(result.current.completeOnboarding()).rejects.toThrow()
+      await expect(result.current.completeOnboarding('local')).rejects.toThrow()
     })
 
     // Open failed → onboarding stays up (the screen surfaces the thrown error)
@@ -291,7 +364,7 @@ describe('GraphProvider mobile onboarding (Plan 19, step 6)', () => {
     expect(settingsStore['mobileOnboarded']).toBeUndefined()
   })
 
-  it('opens the fixed root directly when already onboarded', async () => {
+  it('opens the local root directly when onboarded without a storage kind (pre-Plan-21 installs)', async () => {
     settingsStore = { mobileOnboarded: true }
     const { result } = renderHook(() => useGraph(), { wrapper: mobileWrapper })
 
@@ -303,5 +376,56 @@ describe('GraphProvider mobile onboarding (Plan 19, step 6)', () => {
     await waitFor(() => expect(result.current.status).toBe('ready'))
     expect(result.current.needsOnboarding).toBe(false)
     expect(result.current.graph?.root).toBe(MOBILE_ROOT)
+    expect(result.current.mobileStorageKind).toBe('local')
+  })
+
+  it('opens the first container graph when onboarded onto iCloud with no saved name (pre-multi-graph installs)', async () => {
+    settingsStore = { mobileOnboarded: true, mobileStorage: 'icloud' }
+    storedStorage = {
+      localRoot: MOBILE_ROOT,
+      icloudDocumentsRoot: ICLOUD_ROOT,
+      icloudGraphRoots: [ICLOUD_GRAPH],
+    }
+    const { result } = renderHook(() => useGraph(), { wrapper: mobileWrapper })
+
+    await act(async () => {
+      await waitFor(() => expect(pendingOpens.has(ICLOUD_GRAPH)).toBe(true))
+      resolveOpen(ICLOUD_GRAPH)
+    })
+
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+    expect(result.current.graph?.root).toBe(ICLOUD_GRAPH)
+    expect(result.current.mobileStorageKind).toBe('icloud')
+  })
+
+  it('opens the graph named in settings when the container holds several', async () => {
+    settingsStore = { mobileOnboarded: true, mobileStorage: 'icloud', mobileGraphName: 'Work' }
+    storedStorage = {
+      localRoot: MOBILE_ROOT,
+      icloudDocumentsRoot: ICLOUD_ROOT,
+      icloudGraphRoots: [`${ICLOUD_ROOT}/Notes`, `${ICLOUD_ROOT}/Work`],
+    }
+    const { result } = renderHook(() => useGraph(), { wrapper: mobileWrapper })
+
+    await act(async () => {
+      await waitFor(() => expect(pendingOpens.has(`${ICLOUD_ROOT}/Work`)).toBe(true))
+      resolveOpen(`${ICLOUD_ROOT}/Work`)
+    })
+
+    await waitFor(() => expect(result.current.status).toBe('ready'))
+    expect(result.current.graph?.root).toBe(`${ICLOUD_ROOT}/Work`)
+  })
+
+  it('parks on an honest error when the iCloud graph is unreachable (signed out)', async () => {
+    settingsStore = { mobileOnboarded: true, mobileStorage: 'icloud' }
+    storedStorage = { localRoot: MOBILE_ROOT, icloudDocumentsRoot: null, icloudGraphRoots: [] }
+    const { result } = renderHook(() => useGraph(), { wrapper: mobileWrapper })
+
+    await waitFor(() => expect(result.current.status).toBe('choosing'))
+    // No silent fallback to the empty local root — that would look like the
+    // user's notes vanished. The error names the fix instead.
+    expect(result.current.needsOnboarding).toBe(false)
+    expect(result.current.error).toMatch(/iCloud isn’t available/)
+    expect(invokeLog).not.toContain(`graph_open:${MOBILE_ROOT}`)
   })
 })

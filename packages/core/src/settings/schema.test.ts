@@ -13,6 +13,8 @@ describe('settingsSchema', () => {
       describeAssets: true,
       contactsEnabled: false,
       mobileOnboarded: false,
+      mobileStorage: 'local',
+      mobileGraphName: '',
       theme: 'system',
       timeFormat: '12h',
       dateFormat: 'mdy',
@@ -35,6 +37,7 @@ describe('settingsSchema', () => {
     expect(DEFAULT_SETTINGS.describeAssets).toBe(true)
     expect(DEFAULT_SETTINGS.contactsEnabled).toBe(false)
     expect(DEFAULT_SETTINGS.mobileOnboarded).toBe(false)
+    expect(DEFAULT_SETTINGS.mobileStorage).toBe('local')
     expect(DEFAULT_SETTINGS.theme).toBe('system')
     expect(DEFAULT_SETTINGS.timeFormat).toBe('12h')
     expect(DEFAULT_SETTINGS.dateFormat).toBe('mdy')
@@ -93,6 +96,8 @@ describe('settingsSchema', () => {
       'cal-2',
     ])
     expect(settingsSchema.parse({ calendarIds: [] }).calendarIds).toEqual([])
+    expect(settingsSchema.parse({ mobileStorage: 'icloud' }).mobileStorage).toBe('icloud')
+    expect(settingsSchema.parse({ mobileStorage: 'local' }).mobileStorage).toBe('local')
   })
 
   it('degrades an invalid value to its default instead of failing the load', () => {
@@ -138,6 +143,8 @@ describe('settingsSchema', () => {
     expect(settingsSchema.parse({ calendarEnabled: 1 }).calendarEnabled).toBe(false)
     expect(settingsSchema.parse({ calendarIds: 'cal-1' }).calendarIds).toEqual([])
     expect(settingsSchema.parse({ calendarIds: [7] }).calendarIds).toEqual([])
+    expect(settingsSchema.parse({ mobileStorage: 'dropbox' }).mobileStorage).toBe('local')
+    expect(settingsSchema.parse({ mobileStorage: 1 }).mobileStorage).toBe('local')
   })
 
   it('preserves unknown keys so newer-version settings survive a round trip', () => {
@@ -152,6 +159,8 @@ describe('settingsSchema', () => {
       describeAssets: true,
       contactsEnabled: false,
       mobileOnboarded: false,
+      mobileStorage: 'local',
+      mobileGraphName: '',
       theme: 'system',
       timeFormat: '12h',
       dateFormat: 'mdy',
