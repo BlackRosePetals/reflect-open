@@ -1,8 +1,8 @@
 import type { Database } from '@reflect/db'
 import { sql, type Selectable } from 'kysely'
 import { readNote } from '../graph/commands'
+import { blockContextAt, prepareBlockContext, type BlockContextSource } from './block-context'
 import { db } from './db'
-import { lineAt } from './snippet'
 
 export type Backlink = Pick<
   Selectable<Database['backlinks']>,
@@ -24,18 +24,22 @@ export interface BacklinkContext {
   sourcePath: string
   sourceTitle: string
   /**
-   * The whole source line containing the link, as rich-text-renderable Markdown
-   * (empty when the file is unreadable). Not windowed: a half-cut Markdown token
-   * would garble the rendered snippet, so the panel clamps the line visually.
+   * The Markdown block context around the link (old Reflect's rules — see
+   * {@link blockContextAt}): the whole paragraph, the containing list item with
+   * its children, or the heading's section. Empty when the file is unreadable.
+   * Never windowed: a half-cut Markdown token would garble the rendered snippet.
    */
   snippet: string
   posFrom: number
 }
 
 /**
- * Backlinks of `path` with source titles and line snippets. One read per
- * distinct source; a source that vanished between query and read keeps its row
- * with an empty snippet (the index lags deletes only briefly).
+ * Backlinks of `path` with source titles and block-context snippets. One read
+ * per distinct source; a source that vanished between query and read keeps its
+ * row with an empty snippet (the index lags deletes only briefly). Mentions of
+ * one source that produce an identical context collapse into one row — two
+ * links to `path` in the same paragraph read as a single reference, exactly as
+ * old Reflect deduplicated on `[target, contextHtml]`.
  */
 export async function getBacklinksWithContext(path: string): Promise<BacklinkContext[]> {
   const rows = await db
@@ -52,24 +56,46 @@ export async function getBacklinksWithContext(path: string): Promise<BacklinkCon
     .orderBy('backlinks.posFrom')
     .execute()
 
-  const contents = new Map<string, string | null>()
+  // Every spelling that resolves to the target (title, aliases, daily date),
+  // so sibling branches co-group under any of them — old Reflect compared
+  // resolved note ids, not link text.
+  const targetKeys = new Set(
+    (await db.selectFrom('noteKeys').where('notePath', '=', path).select('key').execute())
+      .map((row) => row.key)
+      .filter((key): key is string => typeof key === 'string'),
+  )
+
+  // One read *and one parse* per distinct source: a well-linked source
+  // contributes many rows, and context extraction walks the parsed body.
+  const sources = new Map<string, BlockContextSource | null>()
   await Promise.all(
     [...new Set(rows.map((row) => row.sourcePath))].map(async (sourcePath) => {
       try {
-        contents.set(sourcePath, await readNote(sourcePath))
+        sources.set(sourcePath, prepareBlockContext(await readNote(sourcePath)))
       } catch {
-        contents.set(sourcePath, null)
+        sources.set(sourcePath, null)
       }
     }),
   )
 
-  return rows.map((row) => {
-    const content = contents.get(row.sourcePath)
-    return {
+  const seen = new Set<string>()
+  const results: BacklinkContext[] = []
+  for (const row of rows) {
+    const source = sources.get(row.sourcePath)
+    const snippet = source == null ? '' : blockContextAt(source, row.posFrom, targetKeys)
+    if (snippet !== '') {
+      const key = `${row.sourcePath}\u0000${snippet}`
+      if (seen.has(key)) {
+        continue
+      }
+      seen.add(key)
+    }
+    results.push({
       sourcePath: row.sourcePath,
       sourceTitle: row.sourceTitle,
-      snippet: content == null ? '' : lineAt(content, row.posFrom),
+      snippet,
       posFrom: row.posFrom,
-    }
-  })
+    })
+  }
+  return results
 }

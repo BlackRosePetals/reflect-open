@@ -153,6 +153,83 @@ describe('getBacklinksWithContext', () => {
     expect(sql).toContain('"backlinks"."source_path"')
     expect(sql).toContain('"backlinks"."pos_from"')
   })
+
+  it('extracts the block context around the link — a list item keeps its children', async () => {
+    const content = '- kickoff with [[target]]\n  - prep the agenda\n- unrelated\n'
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'db_query') {
+        return [
+          {
+            source_path: 'notes/source.md',
+            pos_from: content.indexOf('[[target]]'),
+            source_title: 'Source',
+          },
+        ]
+      }
+      return content
+    })
+
+    const rows = await getBacklinksWithContext('notes/target.md')
+
+    expect(rows.map((row) => row.snippet)).toEqual([
+      '- kickoff with [[target]]\n  - prep the agenda',
+    ])
+  })
+
+  it('co-groups sibling branches through the target aliases, not just the clicked spelling', async () => {
+    const content = '- parent line\n  - one [[Project X]]\n  - two [[projx]]\n'
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command !== 'db_query') {
+        return content
+      }
+      const sql = String(args['sql'])
+      if (sql.includes('note_keys')) {
+        return [{ key: 'project x' }, { key: 'projx' }]
+      }
+      return [
+        {
+          source_path: 'notes/source.md',
+          pos_from: content.indexOf('[[Project X]]'),
+          source_title: 'Source',
+        },
+      ]
+    })
+
+    const rows = await getBacklinksWithContext('notes/target.md')
+
+    expect(rows.map((row) => row.snippet)).toEqual([
+      '- parent line\n  - one [[Project X]]\n  - two [[projx]]',
+    ])
+  })
+
+  it('collapses mentions with an identical context into one row (V1 parity)', async () => {
+    const content = 'both [[target]] links on one [[target]] line\n\nanother [[target]] mention\n'
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'db_query') {
+        return [
+          { source_path: 'notes/source.md', pos_from: 5, source_title: 'Source' },
+          {
+            source_path: 'notes/source.md',
+            pos_from: content.lastIndexOf('[[target]] line'),
+            source_title: 'Source',
+          },
+          {
+            source_path: 'notes/source.md',
+            pos_from: content.indexOf('another'),
+            source_title: 'Source',
+          },
+        ]
+      }
+      return content
+    })
+
+    const rows = await getBacklinksWithContext('notes/target.md')
+
+    expect(rows.map((row) => row.snippet)).toEqual([
+      'both [[target]] links on one [[target]] line',
+      'another [[target]] mention',
+    ])
+  })
 })
 
 describe('getPinnedNotes', () => {
