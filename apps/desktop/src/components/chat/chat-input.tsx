@@ -1,7 +1,13 @@
-import { useMemo, useState, type ReactElement } from 'react'
-import { aiProvider, type AiProviderConfig, type ChatModelOption } from '@reflect/core'
+import { useMemo, type ReactElement } from 'react'
 import { ArrowUp, Plus, Square, X } from 'lucide-react'
 import { ShortcutKeys } from '@/components/shortcut-keys'
+import {
+  Attachment,
+  AttachmentAction,
+  AttachmentActions,
+  AttachmentGroup,
+  AttachmentMedia,
+} from '@/components/ui/attachment'
 import { Button } from '@/components/ui/button'
 import {
   Select,
@@ -14,49 +20,12 @@ import {
 } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { imageFilesFrom } from '@/lib/chat-attachments'
+import { groupModelOptions } from '@/lib/chat-model-groups'
 import { keybindingFor } from '@/lib/commands/app-commands'
 import { useChatSession } from '@/providers/chat-provider'
 import { ChatHistoryMenu } from './chat-history-menu'
 
 const NEW_CHAT_BINDING = keybindingFor('chat.new')
-
-interface ModelOptionGroup {
-  configId: string
-  /** Provider label, key-hint-qualified when the provider is configured twice. */
-  label: string
-  /** The group's models, each with its picker value (index into the options). */
-  options: Array<{ option: ChatModelOption; value: string }>
-}
-
-/**
- * The flat option list regrouped per configured provider for rendering
- * (options arrive consecutively per entry). Values are list indexes — model
- * ids alone can collide across providers.
- */
-function groupModelOptions(
-  options: ChatModelOption[],
-  providers: AiProviderConfig[],
-): ModelOptionGroup[] {
-  const groups: ModelOptionGroup[] = []
-  options.forEach((option, index) => {
-    const item = { option, value: String(index) }
-    const last = groups.at(-1)
-    if (last?.configId === option.configId) {
-      last.options.push(item)
-      return
-    }
-    const providerLabel = aiProvider(option.provider).label
-    const duplicated =
-      providers.filter((provider) => provider.provider === option.provider).length > 1
-    const keyHint = providers.find((provider) => provider.id === option.configId)?.keyHint ?? ''
-    groups.push({
-      configId: option.configId,
-      label: duplicated && keyHint !== '' ? `${providerLabel} ·····${keyHint}` : providerLabel,
-      options: [item],
-    })
-  })
-  return groups
-}
 
 /**
  * The composer: a textarea (Enter sends, Shift-Enter breaks, Esc stops a
@@ -75,6 +44,8 @@ export function ChatInput(): ReactElement {
     modelOptions,
     activeModel,
     selectModel,
+    draft,
+    setDraft,
     attachments,
     attachImages,
     removeAttachment,
@@ -82,9 +53,8 @@ export function ChatInput(): ReactElement {
     stop,
     newChat,
   } = useChatSession()
-  const [text, setText] = useState('')
   const streaming = status === 'streaming'
-  const empty = text.trim() === '' && attachments.length === 0
+  const empty = draft.trim() === '' && attachments.length === 0
 
   const groups = useMemo(
     () => groupModelOptions(modelOptions, providers),
@@ -97,41 +67,47 @@ export function ChatInput(): ReactElement {
       option.modelId === activeModel.model,
   )
 
+  // The draft lives in the provider (it must survive the screen unmounting —
+  // on mobile every tab switch does that), and a send that goes through
+  // clears it there.
   const submit = () => {
     if (streaming || empty) {
       return
     }
-    void send(text)
-    setText('')
+    void send(draft)
   }
 
   return (
     <div className="flex-none px-6 pb-6">
       <div className="mx-auto w-full max-w-2xl rounded-xl border border-border bg-surface focus-within:border-ring">
         {attachments.length > 0 ? (
-          <div className="flex flex-wrap gap-2 px-3.5 pt-3">
+          <AttachmentGroup className="flex-wrap gap-2 overflow-visible px-3.5 pt-3 pb-0">
             {attachments.map((attachment) => (
-              <div key={attachment.id} className="relative">
-                <img
-                  src={attachment.dataUrl}
-                  alt={attachment.name}
-                  className="size-14 rounded-lg border border-border object-cover"
-                />
-                <button
-                  type="button"
-                  aria-label={`Remove ${attachment.name}`}
-                  onClick={() => removeAttachment(attachment.id)}
-                  className="absolute -top-1.5 -right-1.5 flex size-4 items-center justify-center rounded-full border border-border bg-surface text-text-muted hover:text-text"
-                >
-                  <X aria-hidden className="size-3" />
-                </button>
-              </div>
+              <Attachment
+                key={attachment.id}
+                orientation="vertical"
+                size="sm"
+                className="w-16 bg-surface"
+              >
+                <AttachmentMedia variant="image" className="w-14">
+                  <img src={attachment.dataUrl} alt={attachment.name} />
+                </AttachmentMedia>
+                <AttachmentActions className="!top-0 !right-0 -translate-y-1/2 translate-x-1/2">
+                  <AttachmentAction
+                    aria-label={`Remove ${attachment.name}`}
+                    className="size-4 rounded-full border border-border bg-surface p-0 text-text-muted hover:text-text"
+                    onClick={() => removeAttachment(attachment.id)}
+                  >
+                    <X aria-hidden className="size-3" />
+                  </AttachmentAction>
+                </AttachmentActions>
+              </Attachment>
             ))}
-          </div>
+          </AttachmentGroup>
         ) : null}
         <textarea
-          value={text}
-          onChange={(event) => setText(event.target.value)}
+          value={draft}
+          onChange={(event) => setDraft(event.target.value)}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault()

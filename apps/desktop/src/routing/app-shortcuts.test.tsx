@@ -4,15 +4,25 @@ import type { ReactNode } from 'react'
 import { PaletteProvider, usePalette } from '@/components/command-palette/palette-provider'
 import { listRegisteredBindings } from '@/editor/keymap'
 import { registerAppCommands } from '@/lib/commands/app-commands'
+import { NoteTemplatesProvider } from '@/providers/note-templates-provider'
 import { ShortcutsProvider, useShortcuts } from '@/providers/shortcuts-provider'
 import { SidebarProvider } from '@/providers/sidebar-provider'
 import { useAppShortcuts } from './app-shortcuts'
 import { RouterProvider, useRouter } from './router'
 
 const newChat = vi.hoisted(() => vi.fn())
+const openRecent = vi.hoisted(() => vi.fn())
 
 vi.mock('@/providers/graph-provider', () => ({
-  useGraph: () => ({ graph: { root: '/g', name: 'g', cloudSync: null, generation: 1 } }),
+  useGraph: () => ({
+    graph: { root: '/g', name: 'g', generation: 1 },
+    recents: [
+      { root: '/g', name: 'g', openedMs: 3 },
+      { root: '/work', name: 'Work', openedMs: 2 },
+      { root: '/side', name: 'Side', openedMs: 1 },
+    ],
+    openRecent,
+  }),
 }))
 vi.mock('@/providers/theme-provider', () => ({
   useTheme: () => ({ theme: 'light', resolvedTheme: 'light', setTheme: vi.fn() }),
@@ -32,7 +42,10 @@ vi.mock('@/providers/chat-provider', () => ({
 
 registerAppCommands() // production does this in main.tsx
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  openRecent.mockClear()
+})
 
 function shortcutsHook() {
   return renderHook(
@@ -45,7 +58,9 @@ function shortcutsHook() {
         <RouterProvider>
           <PaletteProvider>
             <ShortcutsProvider>
-              <SidebarProvider>{children}</SidebarProvider>
+              <NoteTemplatesProvider>
+                <SidebarProvider>{children}</SidebarProvider>
+              </NoteTemplatesProvider>
             </ShortcutsProvider>
           </PaletteProvider>
         </RouterProvider>
@@ -60,6 +75,18 @@ function press(key: string, options: KeyboardEventInit = {}) {
   )
 }
 
+function pressFrom(target: EventTarget, key: string, options: KeyboardEventInit = {}) {
+  target.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key,
+      metaKey: true,
+      cancelable: true,
+      bubbles: true,
+      ...options,
+    }),
+  )
+}
+
 describe('app shortcuts', () => {
   it('registers the command keybindings in the central keymap registry', () => {
     const bindings = listRegisteredBindings()
@@ -71,6 +98,9 @@ describe('app shortcuts', () => {
       'Mod-[',
       'Mod-]',
       'Mod-k',
+      'Alt-Mod-l',
+      'Meta-1',
+      'Meta-9',
     ]) {
       expect(bindings.get(key)).toBe('app')
     }
@@ -92,6 +122,57 @@ describe('app shortcuts', () => {
 
     act(() => press(']'))
     expect(result.current.router.route).toEqual({ kind: 'today' })
+  })
+
+  it('⌘N from today makes back re-anchor Daily instead of restoring stale scroll', () => {
+    const { result } = shortcutsHook()
+    act(() => result.current.router.saveScrollState(735))
+    expect(result.current.router.savedScroll()).toBe(735)
+
+    act(() => press('n'))
+    expect(result.current.router.route.kind).toBe('note')
+
+    act(() => press('['))
+    expect(result.current.router.route).toEqual({ kind: 'today' })
+    expect(result.current.router.savedScroll()).toBeNull()
+  })
+
+  it('⌘[ and ⌘] still traverse when the focused editor consumes the keydown', () => {
+    const { result } = shortcutsHook()
+    act(() => press('n'))
+    act(() => press('d'))
+    expect(result.current.router.route).toEqual({ kind: 'today' })
+
+    const editor = document.createElement('div')
+    document.body.append(editor)
+    editor.addEventListener('keydown', (event) => event.preventDefault())
+
+    try {
+      act(() => pressFrom(editor, 'Unidentified', { code: 'BracketLeft' }))
+      expect(result.current.router.route.kind).toBe('note')
+
+      act(() => pressFrom(editor, 'Unidentified', { code: 'BracketRight' }))
+      expect(result.current.router.route).toEqual({ kind: 'today' })
+    } finally {
+      editor.remove()
+    }
+  })
+
+  it('matches bracket history shortcuts by produced key on non-US layouts', () => {
+    const { result } = shortcutsHook()
+    act(() => press('n'))
+    const opened = result.current.router.route
+    act(() => press('d'))
+    expect(result.current.router.route).toEqual({ kind: 'today' })
+
+    // On JIS keyboards the key labeled `[` can report a physical BracketRight
+    // code. The user-facing shortcut is character-based, so event.key wins.
+    act(() => press('[', { code: 'BracketRight' }))
+    expect(result.current.router.route).toEqual(opened)
+
+    act(() => press(']', { code: 'BracketLeft' }))
+    expect(result.current.router.route).toEqual({ kind: 'today' })
+    expect(result.current.router.canForward).toBe(false)
   })
 
   it('⌘K opens the palette', () => {
@@ -142,6 +223,51 @@ describe('app shortcuts', () => {
     act(() => press('n', { shiftKey: true }))
     expect(result.current.router.route).toEqual({ kind: 'today' })
     expect(newChat).not.toHaveBeenCalled()
+  })
+
+  it('⌘number switches to the matching recent graph', () => {
+    shortcutsHook()
+
+    act(() => press('1'))
+    expect(openRecent).not.toHaveBeenCalled() // first row is already open
+
+    act(() => press('2'))
+    expect(openRecent).toHaveBeenCalledWith('/work')
+
+    act(() => press('9'))
+    expect(openRecent).toHaveBeenCalledTimes(1)
+  })
+
+  it('matches graph number shortcuts by physical digit key on symbol-producing layouts', () => {
+    shortcutsHook()
+
+    act(() => press('@', { code: 'Digit2' }))
+
+    expect(openRecent).toHaveBeenCalledWith('/work')
+  })
+
+  it('strips Shift from physical digit fallback on layouts where digits require Shift', () => {
+    shortcutsHook()
+
+    act(() => press('2', { code: 'Digit2', shiftKey: true }))
+
+    expect(openRecent).toHaveBeenCalledWith('/work')
+  })
+
+  it('does not turn produced symbols with Shift into graph number shortcuts', () => {
+    shortcutsHook()
+
+    act(() => press('@', { code: 'Digit2', shiftKey: true }))
+
+    expect(openRecent).not.toHaveBeenCalled()
+  })
+
+  it('keeps graph switching on the Meta key, not Ctrl-number', () => {
+    shortcutsHook()
+
+    act(() => press('2', { metaKey: false, ctrlKey: true }))
+
+    expect(openRecent).not.toHaveBeenCalled()
   })
 
   it('matches uppercase keys (caps lock) and ignores auto-repeat', () => {

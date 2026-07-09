@@ -40,6 +40,7 @@ export {
   appendBlock,
   appendUnderHeading,
   appendTaskLine,
+  wikiLinkSafe,
   editTaskLine,
   removeTaskLine,
   renameWikiLink,
@@ -51,13 +52,21 @@ export {
 } from './edit'
 export { parseTaskMarker } from './task-marker'
 export {
+  conflictMarkerBlockCount,
+  conflictMarkerLabels,
   detectConflictMarkers,
+  parseConflictMarkers,
   resolveConflictMarkers,
+  type ConflictMarkerLabels,
   type ConflictResolution,
+  type ConflictSegment,
+  type ConflictSide,
 } from './conflict-markers'
+export { extractEmailFields, foldEmail } from './email-fields'
 export { foldKey, foldTag } from './keys'
 export { gistBodyHash, gistFilename } from './gist'
 export { slugForTitle } from './slug'
+export { subjectAliases } from './subject-aliases'
 export {
   normalizeWikiTarget,
   resolved,

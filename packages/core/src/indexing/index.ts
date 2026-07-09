@@ -19,8 +19,11 @@ export {
   emitFileChanges,
   type FileChange,
 } from './file-changes'
-export { setLocalWriteEcho } from './local-write-echo'
+export { setLocalWriteEcho, subscribeOwnWrites } from './local-write-echo'
+export { subscribeIcloudConflicts, subscribeIcloudWatchFailed } from './icloud-conflicts'
 export { subscribeIndexApplied, type IndexAppliedListener } from './index-applied'
+export { INDEX_WRITTEN_EVENT, subscribeIndexWritten } from './index-written'
+export { NOTE_MOVED_EVENT, subscribeNoteMoved } from './note-moved'
 export {
   subscribeIndexChanges,
   applyIndexChanges,
@@ -28,7 +31,13 @@ export {
   type MovedHandler,
 } from './live'
 export { hashContent } from './hash'
-export { availableNotePath, slugPathForTitle } from './note-paths'
+export {
+  availableNotePath,
+  availableTemplatePath,
+  slugPathForTitle,
+  templateSlugPathForTitle,
+} from './note-paths'
+export { listTemplates, type TemplateEntry } from './template-list'
 export {
   buildIndexedNote,
   indexedNoteSchema,
@@ -66,7 +75,8 @@ export {
   searchNotes,
   suggestWikiTargets,
   suggestTags,
-  getIndexedHashes,
+  getIndexedFileFacts,
+  getIndexedFileFactsByPath,
   listDailyNotes,
   resolveWikiTarget,
   type Backlink,
@@ -81,6 +91,7 @@ export {
   type SearchHit,
   type TagSuggestion,
 } from './queries'
+export { resolveNoteTarget } from './resolve-target'
 export { groupTasks, taskDateBucket, type TaskGroup, type TaskGroupKind } from './group-tasks'
 export {
   listNotes,
@@ -111,8 +122,20 @@ export {
   type HighlightSegment,
 } from './search'
 export { lineAt, lineSnippet, previewSnippet } from './snippet'
+export {
+  blockContextAt,
+  blockContextLinesAt,
+  prepareBlockContext,
+  type BlockContextLines,
+  type BlockContextSource,
+} from './block-context'
+export { extractSnippetTasks, type SnippetTask } from './snippet-tasks'
 export { parseSearchQuery, type ParsedSearchQuery, type SearchFilters } from './filter-query'
-export { searchWithFilters, type FilteredSearchHit } from './filtered-search'
+export {
+  searchWithFilters,
+  type FilteredSearchHit,
+  type FilteredSearchOptions,
+} from './filtered-search'
 export {
   rewriteLinksForTitleChange,
   nextAliases,

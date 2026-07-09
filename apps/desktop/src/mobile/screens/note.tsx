@@ -1,9 +1,11 @@
 import { type ReactElement } from 'react'
-import { ChevronLeft } from 'lucide-react'
+import { isUntitledNotePath } from '@reflect/core'
 import { NotePane } from '@/components/note-pane'
-import { Button } from '@/components/ui/button'
-import { isUntitledNotePath } from '@/lib/create-note'
+import { IncomingBacklinks } from '@/mobile/incoming-backlinks'
+import { MOBILE_CONTENT_GUTTER } from '@/mobile/mobile-content-gutter'
+import { MobileScreenHeader } from '@/mobile/screen-header'
 import { NoteActionsMenu } from '@/mobile/note-actions-menu'
+import { cn } from '@/lib/utils'
 import { useRouter } from '@/routing/router'
 
 /**
@@ -11,8 +13,11 @@ import { useRouter } from '@/routing/router'
  * (Plan 19). Lazy like the desktop note route, so a link to a not-yet-created
  * note opens an empty editor and the file is born on the first keystroke; a
  * fresh untitled note (`+`, V1 parity) autofocuses so the keyboard is up and
- * typing names it via the ghost-title flow. Back pops the history stack; a
- * cold entry (nothing to pop) lands on today instead.
+ * typing names it via the ghost-title flow. That is the only arrival that
+ * focuses: navigating here (wiki link, backlink, All list, back) never raises
+ * the keyboard — a focus during the stack animation would pull the keyboard
+ * up mid-slide. Back pops the history stack; a cold entry (nothing to pop)
+ * lands on today instead.
  */
 export function MobileNote({ path }: { path: string }): ReactElement {
   const { back, canBack, navigate } = useRouter()
@@ -20,42 +25,40 @@ export function MobileNote({ path }: { path: string }): ReactElement {
 
   return (
     <div className="flex h-full w-screen flex-col" style={{ paddingTop: 'env(safe-area-inset-top)' }}>
-      <header className="flex shrink-0 items-center gap-1 border-b border-border px-1 pb-1">
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-10"
-          aria-label="Back"
-          onClick={() => (canBack ? back() : navigate({ kind: 'today' }))}
-        >
-          <ChevronLeft />
-        </Button>
-        <h1 className="min-w-0 flex-1 truncate text-base font-semibold">
-          {untitled ? 'New note' : noteTitleFromPath(path)}
-        </h1>
-        <NoteActionsMenu
-          path={path}
-          onDeleted={() => (canBack ? back() : navigate({ kind: 'today' }))}
-        />
-      </header>
+      <MobileScreenHeader
+        title={untitled ? 'New note' : 'Edit note'}
+        onBack={() => (canBack ? back() : navigate({ kind: 'today' }))}
+        trailing={
+          <NoteActionsMenu
+            path={path}
+            onDeleted={() => (canBack ? back() : navigate({ kind: 'today' }))}
+          />
+        }
+      />
       <main
         className="min-h-0 flex-1 overflow-y-auto"
-        style={{ paddingBottom: 'max(env(safe-area-inset-bottom), var(--keyboard-height, 0px))' }}
+        // Keyboard avoidance is the shell root's job (it ends at the
+        // keyboard's top); this only clears the home indicator when the
+        // keyboard is down.
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
       >
         <NotePane
           path={path}
           lazy
           autoFocus={untitled}
-          gutterClassName="px-4"
+          showBacklinks={false}
+          // The daily surface gets its top inset from the date header; a
+          // plain note has no chrome between the header bar and the body,
+          // so the pane carries the vertical breathing room itself.
+          className="pt-4"
+          gutterClassName={MOBILE_CONTENT_GUTTER}
           editorClassName="min-h-[60dvh]"
         />
+        {/* The mobile section (touch chrome) replaces NotePane's built-in
+            desktop panel; a daily-note backlink opens the Daily surface at
+            that date rather than pushing another note screen. */}
+        <IncomingBacklinks path={path} className={cn(MOBILE_CONTENT_GUTTER, 'pb-4')} />
       </main>
     </div>
   )
-}
-
-/** Readable filenames (Plan 17) make the basename the working title. */
-function noteTitleFromPath(path: string): string {
-  const base = path.slice(path.lastIndexOf('/') + 1)
-  return base.endsWith('.md') ? base.slice(0, -'.md'.length) : base
 }

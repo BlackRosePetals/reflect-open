@@ -65,7 +65,7 @@ fn is_eligible_asset(rel_str: &str) -> bool {
 }
 
 /// Graph-relative path if `path` is tracked: a markdown note (`.md` under
-/// `daily/` or `notes/`), an audio-memo recording (anything under
+/// `daily/`, `notes/`, or `templates/`), an audio-memo recording (anything under
 /// `audio-memos/`), a spooled capture envelope (`.json` under `.reflect/inbox/`
 /// — the one carve-out from the `.reflect/` blackout; the envelope is the
 /// spool's commit point and triggers the capture drain), or an eligible asset
@@ -74,7 +74,13 @@ fn is_eligible_asset(rel_str: &str) -> bool {
 fn tracked_relpath(path: &Path, root: &Path) -> Option<String> {
     let rel = path.strip_prefix(root).ok()?;
     let rel_str = rel.to_string_lossy().replace('\\', "/");
-    let note = (rel_str.starts_with("daily/") || rel_str.starts_with("notes/"))
+    // An iCloud eviction placeholder tracks as the file it stands in for —
+    // eviction/re-download events must never read as a stub appearing or the
+    // note being deleted (Plan 21).
+    let rel_str = evicted_logical_relpath(&rel_str).unwrap_or(rel_str);
+    let note = (rel_str.starts_with("daily/")
+        || rel_str.starts_with("notes/")
+        || rel_str.starts_with("templates/"))
         && rel_str.ends_with(".md");
     let recording = rel_str.starts_with("audio-memos/");
     let capture = rel_str.starts_with(".reflect/inbox/") && rel_str.ends_with(".json");
@@ -82,25 +88,50 @@ fn tracked_relpath(path: &Path, root: &Path) -> Option<String> {
     (note || recording || capture || asset).then_some(rel_str)
 }
 
+/// `notes/.a.md.icloud` → `Some("notes/a.md")`: the graph-relative path of the
+/// file an iCloud eviction placeholder stands in for, `None` for anything
+/// that isn't a placeholder name.
+fn evicted_logical_relpath(rel_str: &str) -> Option<String> {
+    let (dir, name) = match rel_str.rsplit_once('/') {
+        Some((dir, name)) => (Some(dir), name),
+        None => (None, rel_str),
+    };
+    let logical = crate::fs::icloud_placeholder_target(name)?;
+    Some(match dir {
+        Some(dir) => format!("{dir}/{logical}"),
+        None => logical.to_string(),
+    })
+}
+
 /// Reduce a debounced batch of paths to unique tracked changes (last kind wins).
 /// Create/modify vs delete is decided by whether the file currently stats; the
-/// same stat supplies the upsert's `modified_ms`.
+/// same stat supplies the upsert's `modified_ms`. A file that is gone but has
+/// an eviction placeholder in its place was offloaded by iCloud, not deleted:
+/// no event — the index keeps its last-known content until re-download.
 fn collect_changes(paths: &[PathBuf], root: &Path) -> Vec<FileChange> {
     let mut seen: std::collections::BTreeMap<String, FileChange> =
         std::collections::BTreeMap::new();
     for path in paths {
         if let Some(rel) = tracked_relpath(path, root) {
-            let change = match std::fs::metadata(path) {
+            // Stat the *logical* path — for placeholder events it differs
+            // from the event path, and it is what consumers read.
+            let logical = root.join(&rel);
+            let change = match std::fs::metadata(&logical) {
                 Ok(meta) => FileChange {
                     path: rel.clone(),
                     kind: "upsert".to_string(),
                     modified_ms: crate::fs::modified_ms(&meta),
                 },
-                Err(_) => FileChange {
-                    path: rel.clone(),
-                    kind: "remove".to_string(),
-                    modified_ms: None,
-                },
+                Err(_) => {
+                    if crate::fs::eviction_placeholder(&logical).is_some_and(|stub| stub.exists()) {
+                        continue; // evicted, not deleted
+                    }
+                    FileChange {
+                        path: rel.clone(),
+                        kind: "remove".to_string(),
+                        modified_ms: None,
+                    }
+                }
             };
             seen.insert(rel, change);
         }
@@ -192,6 +223,15 @@ mod tests {
         assert_eq!(
             tracked_relpath(Path::new("/g/daily/2026-06-09.md"), root).as_deref(),
             Some("daily/2026-06-09.md")
+        );
+        // Templates are tracked like notes; only `.md` files count.
+        assert_eq!(
+            tracked_relpath(Path::new("/g/templates/journal.md"), root).as_deref(),
+            Some("templates/journal.md")
+        );
+        assert_eq!(
+            tracked_relpath(Path::new("/g/templates/journal.txt"), root),
+            None
         );
         // Recordings are tracked whole-directory: they feed the sync debounce
         // and the transcription reconciler.
@@ -300,5 +340,57 @@ mod tests {
         assert_eq!(changes[0].kind, "upsert");
         // A real timestamp, not epoch zero — All Notes sorts and labels by it.
         assert!(changes[0].modified_ms.is_some_and(|ms| ms > 0));
+    }
+
+    #[test]
+    fn placeholder_events_track_as_their_logical_note() {
+        let root = Path::new("/g");
+        assert_eq!(
+            tracked_relpath(Path::new("/g/notes/.a.md.icloud"), root).as_deref(),
+            Some("notes/a.md")
+        );
+        assert_eq!(
+            tracked_relpath(Path::new("/g/audio-memos/.memo.m4a.icloud"), root).as_deref(),
+            Some("audio-memos/memo.m4a")
+        );
+        // The logical file must still pass the tracking rules.
+        assert_eq!(
+            tracked_relpath(Path::new("/g/notes/.a.txt.icloud"), root),
+            None
+        );
+    }
+
+    #[test]
+    fn eviction_emits_nothing_when_the_placeholder_is_present() {
+        // iCloud offloaded the note: the file is gone but its `.icloud` stub
+        // remains. That must not read as a deletion — the index keeps the
+        // note's last-known content until re-download.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::write(root.join("notes/.a.md.icloud"), b"stub").unwrap();
+
+        // The debounced batch carries both the vanished note and the stub.
+        let changes = collect_changes(
+            &[root.join("notes/a.md"), root.join("notes/.a.md.icloud")],
+            root,
+        );
+        assert!(changes.is_empty(), "eviction leaked events: {changes:?}");
+    }
+
+    #[test]
+    fn redownload_events_upsert_the_logical_note() {
+        // Mid-download both the stub and the real file can exist; whichever
+        // path the event carries, the change is an upsert of the note.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::write(root.join("notes/a.md"), "# a").unwrap();
+        std::fs::write(root.join("notes/.a.md.icloud"), b"stub").unwrap();
+
+        let changes = collect_changes(&[root.join("notes/.a.md.icloud")], root);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].path, "notes/a.md");
+        assert_eq!(changes[0].kind, "upsert");
     }
 }

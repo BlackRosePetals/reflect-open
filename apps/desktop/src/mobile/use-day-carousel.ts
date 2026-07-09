@@ -1,22 +1,54 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { startTransition, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import useEmblaCarousel from 'embla-carousel-react'
 import { createDayWindow, dateAtIndex, indexWithin, type DayWindow } from '@/lib/day-window'
+import { getKeyboardHeight } from '@/mobile/use-keyboard'
 
 /**
  * Days either side of the carousel anchor. A generous fixed **symmetric**
  * window (~1 year each way) lets Embla page between days without runtime
- * re-anchoring; only the slides near the selection mount an editor, so the
- * empty ones are cheap spacers. A date-link beyond it (the rare case)
- * re-anchors the window around the new day. The desktop daily stream shares the
- * window math ({@link createDayWindow}) with a wider, asymmetric reach — but it
- * truly virtualizes its rows, where the carousel renders every slide spacer and
+ * re-anchoring in ordinary use; only the slides near the selection mount an
+ * editor, so the empty ones are cheap spacers. Swiping within
+ * {@link RECENTER_MARGIN} of an edge (or a date-link beyond the window)
+ * re-anchors it around the current day, so both directions stay effectively
+ * infinite (V1 parity). The desktop daily stream shares the window math
+ * ({@link createDayWindow}) with a wider, asymmetric reach — but it truly
+ * virtualizes its rows, where the carousel renders every slide spacer and
  * only mounts the editors near the selection.
  */
 export const CAROUSEL_RADIUS = 366
 
+/**
+ * How close (in slides) a settled swipe may get to a window edge before the
+ * window re-centers around the current day. Generous enough that a swipe
+ * burst never lands on the hard edge between settles.
+ */
+export const RECENTER_MARGIN = 30
+
 const CAROUSEL_WINDOW: Readonly<{ past: number; future: number }> = {
   past: CAROUSEL_RADIUS,
   future: CAROUSEL_RADIUS,
+}
+
+/**
+ * True when `index` sits within `margin` slides of either edge of the window —
+ * the signal to rebuild it centered on the current day. Pure for testing.
+ */
+export function shouldRecenter(
+  window: DayWindow,
+  index: number,
+  margin: number = RECENTER_MARGIN,
+): boolean {
+  return index < margin || index >= window.count - margin
+}
+
+/**
+ * Embla's `watchDrag` predicate: swiping between days is disabled while the
+ * software keyboard is up (V1 parity — horizontal drags would fight text
+ * selection and the caret). Module-level so the options object stays stable
+ * across renders; Embla evaluates it at drag start.
+ */
+function dragAllowedWithKeyboardClosed(): boolean {
+  return getKeyboardHeight() === 0
 }
 
 /** What the carousel should do when the external target `date` changes. */
@@ -44,8 +76,9 @@ export interface ReconcileInput {
  * branchy reconciliation can be unit-tested without driving Embla:
  *
  * - `none` when the date is outside the window (`index === -1`, a re-anchor is
- *   pending) or is the echo of our own swipe (already reported) — re-scrolling
- *   then would cancel the in-flight animation.
+ *   pending) or is the echo of our own swipe (already reported) — the carousel
+ *   is already showing that slide, and the echo's redundant jump would clip an
+ *   animation the user may have restarted.
  * - `reinit` when the window was re-anchored (its start moved): Embla must
  *   reinitialize onto the rebuilt slide set at the target index.
  * - `scroll` for an ordinary in-window jump (calendar tap, Today, near link).
@@ -77,20 +110,33 @@ export interface DayCarousel {
  * and the bidirectional `date ↔ slide` sync, leaving {@link DayCarousel} (the
  * component) purely declarative.
  *
- * A settled swipe reports its day via `onSelect` (which the parent turns into a
- * daily-route navigation); the route flows back in as `date` and scrolls the
+ * A swipe's destination is announced twice: `onTarget` fires at pointer-up
+ * with the day the swipe will land on (for lightweight chrome — the calendar
+ * strip and its month title — to follow while the snap animation plays), and
+ * `onSelect` fires once the swipe settles (which the parent turns into a
+ * daily-route navigation). The route flows back in as `date` and scrolls the
  * carousel to match — guarded by {@link reconcileCarousel} so the swipe's own
- * echo doesn't re-scroll and cancel the animation. A `date` beyond the window
- * re-anchors it, and the follow effect then reinitializes Embla onto the new
- * slides.
+ * echo doesn't redundantly re-scroll. A `date` beyond the window re-anchors it,
+ * and the follow effect then reinitializes Embla onto the new slides.
  */
-export function useDayCarousel(date: string, onSelect: (date: string) => void): DayCarousel {
+export function useDayCarousel(
+  date: string,
+  onSelect: (date: string) => void,
+  onTarget: (date: string) => void,
+): DayCarousel {
   const [dayWindow, setDayWindow] = useState<DayWindow>(() => createDayWindow(date, CAROUSEL_WINDOW))
-  const [emblaRef, emblaApi] = useEmblaCarousel({
+  // Frozen at mount: `embla-carousel-react` reinitializes whenever the options
+  // object stops comparing equal, and `reInit` snaps to `startIndex` with no
+  // animation — a render-derived `startIndex` would let every swipe's route
+  // echo cancel the settle animation and hard-switch to the landed slide.
+  // After mount, positioning belongs exclusively to the follow effect below.
+  const [emblaOptions] = useState<Parameters<typeof useEmblaCarousel>[0]>(() => ({
     startIndex: indexWithin(dayWindow, date),
     align: 'center',
     skipSnaps: false,
-  })
+    watchDrag: dragAllowedWithKeyboardClosed,
+  }))
+  const [emblaRef, emblaApi] = useEmblaCarousel(emblaOptions)
   const [selectedIndex, setSelectedIndex] = useState(() => indexWithin(dayWindow, date))
   // The day we last reported via onSelect — so the route echo it produces
   // doesn't trigger a redundant (animation-cancelling) scrollTo.
@@ -99,7 +145,38 @@ export function useDayCarousel(date: string, onSelect: (date: string) => void): 
   // so Embla must reinitialize rather than scroll.
   const windowStartRef = useRef(dayWindow.start)
 
+  // The swipe's target is known at pointer-up (`select`), and two light
+  // things follow it from there. The slide window: the mount radius tracks
+  // `selectedIndex`, and a second swipe started mid-animation must land on a
+  // mounted slide, not a blank spacer (the quick double-swipe). And
+  // `onTarget`: the calendar strip — month title included — moves with the
+  // gesture rather than after it. Both inside a transition, so React fits
+  // the work around the snap animation's frames instead of blocking its
+  // first ones.
   const onEmblaSelect = useCallback(
+    (api: NonNullable<typeof emblaApi>) => {
+      const index = api.selectedScrollSnap()
+      startTransition(() => {
+        setSelectedIndex(index)
+        onTarget(dateAtIndex(dayWindow, index))
+      })
+    },
+    [dayWindow, onTarget],
+  )
+
+  // The swipe's heavy consequence — reporting the day, which the parent turns
+  // into a route navigation re-rendering the whole surface — waits for
+  // `settle` (snap animation done). Embla's fixed-timestep animation loop has
+  // no lag cap, so paying that cost in the release frame would fast-forward
+  // the physics to the target: the note would switch instantly instead of
+  // sliding over.
+  //
+  // Settling near a window edge also rebuilds the window around the current
+  // day, keeping swiping effectively infinite in both directions. The report
+  // above lands in the same batch, so the follow effect below sees the
+  // re-anchored window together with the new `date` and reinitializes Embla
+  // onto the slide the user is already looking at.
+  const onEmblaSettle = useCallback(
     (api: NonNullable<typeof emblaApi>) => {
       const index = api.selectedScrollSnap()
       setSelectedIndex(index)
@@ -107,6 +184,9 @@ export function useDayCarousel(date: string, onSelect: (date: string) => void): 
       if (day !== reportedRef.current) {
         reportedRef.current = day
         onSelect(day)
+      }
+      if (shouldRecenter(dayWindow, index)) {
+        setDayWindow(createDayWindow(day, CAROUSEL_WINDOW))
       }
     },
     [dayWindow, onSelect],
@@ -117,10 +197,12 @@ export function useDayCarousel(date: string, onSelect: (date: string) => void): 
       return
     }
     emblaApi.on('select', onEmblaSelect)
+    emblaApi.on('settle', onEmblaSettle)
     return () => {
       emblaApi.off('select', onEmblaSelect)
+      emblaApi.off('settle', onEmblaSettle)
     }
-  }, [emblaApi, onEmblaSelect])
+  }, [emblaApi, onEmblaSelect, onEmblaSettle])
 
   // Re-anchor only when the requested day falls outside the window (a far date
   // link): rebuild the window centered on it. The follow effect below then

@@ -2,8 +2,10 @@ import { describe, expect, it } from 'vitest'
 import type { RetrievalHit } from '../embeddings/retrieve'
 import {
   assertCloudAllowed,
+  cloudSafeAssetDescription,
   cloudSafeNoteContent,
   cloudSafeSearchHits,
+  cloudSafeSelection,
   isPrivateNoteError,
   PrivateNoteError,
 } from './checkers'
@@ -122,6 +124,48 @@ describe('cloudSafeNoteContent', () => {
         content: PRIVATE_BODY,
         truncated: false,
       }),
+    ).toThrow(PrivateNoteError)
+  })
+})
+
+describe('cloudSafeAssetDescription', () => {
+  it('mints a description for a sendable asset', () => {
+    expect(
+      cloudSafeAssetDescription({
+        path: 'assets/chart.png',
+        isPrivate: false,
+        description: 'A bar chart of Q4 revenue.',
+        truncated: false,
+      }),
+    ).toEqual({
+      path: 'assets/chart.png',
+      description: 'A bar chart of Q4 revenue.',
+      truncated: false,
+    })
+  })
+
+  it('refuses to mint a blocked asset before any description escapes', () => {
+    expect(() =>
+      cloudSafeAssetDescription({
+        path: 'assets/secret.png',
+        isPrivate: true,
+        description: PRIVATE_BODY,
+        truncated: false,
+      }),
+    ).toThrow(PrivateNoteError)
+  })
+})
+
+describe('cloudSafeSelection', () => {
+  it('mints a selection from a non-private note', () => {
+    expect(cloudSafeSelection({ path: 'notes/a.md', isPrivate: false }, 'selected text')).toBe(
+      'selected text',
+    )
+  })
+
+  it('refuses to mint a selection from a private note', () => {
+    expect(() =>
+      cloudSafeSelection({ path: PRIVATE_PATH, isPrivate: true }, PRIVATE_BODY),
     ).toThrow(PrivateNoteError)
   })
 })

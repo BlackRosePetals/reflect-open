@@ -106,6 +106,15 @@ export const frontmatterSchema = z
      * publish then creates a fresh gist and rewrites it whole.
      */
     gist: gistFrontmatterSchema.optional().catch(undefined),
+    /**
+     * Contact names whose suggested-contact card was dismissed on this note
+     * (v1's `ignoredContactNames`). Per contact, not per note: ignoring "Ada"
+     * must not suppress a later "Grace" suggestion after a retitle. An added
+     * contact needs no mark — the details it writes into the body suppress
+     * the card by content. A mangled value degrades to the empty list; the
+     * card reappears, nothing breaks.
+     */
+    ignoredContacts: z.array(z.string()).catch([]).default([]),
   })
 export type Frontmatter = z.infer<typeof frontmatterSchema>
 
@@ -171,9 +180,9 @@ export interface TaskMarker {
 }
 
 /**
- * A GFM checkbox item (`- [ ] text` / `- [x] text`) — the unit the Tasks view
- * (Plan 18) projects across the graph. Every checkbox is a task; there is no
- * invented syntax, so the files stay meaningful in any markdown tool.
+ * A Reflect task item (`+ [ ] text` / `+ [x] text`) — the unit the Tasks view
+ * (Plan 18) projects across the graph. Square checklist checkboxes stay in the
+ * note only and are intentionally excluded from the aggregate Tasks view.
  */
 export interface ParsedTask extends TaskMarker {
   /** Inline text of the item's marker line, markdown stripped, for display + search. */
@@ -191,8 +200,10 @@ export interface ParsedTask extends TaskMarker {
 }
 
 /** Version of the extraction contract; bump on breaking shape changes.
- * 1 — Plan 03 baseline · 2 — `tasks: ParsedTask[]` (with `dueDate`) added (Plan 18). */
-export const PARSED_NOTE_VERSION = 2
+ * 1 — Plan 03 baseline · 2 — `tasks: ParsedTask[]` (with `dueDate`) added (Plan 18) ·
+ * 3 — tasks limited to round Meowdown `+ [ ]` / `+ [x]` syntax; square checklist
+ * checkboxes are excluded. */
+export const PARSED_NOTE_VERSION = 3
 
 /** The full parse of one note — the stable contract downstream plans depend on. */
 export interface ParsedNote {
@@ -211,7 +222,7 @@ export interface ParsedNote {
   tags: string[]
   headings: Heading[]
   assets: AssetRef[]
-  /** GFM checkbox items in document order — the Tasks projection (Plan 18). */
+  /** Reflect task items in document order — the Tasks projection (Plan 18). */
   tasks: ParsedTask[]
   /** Plain-text rendering of the body for FTS (Plan 08) + AI context (Plan 10). */
   text: string

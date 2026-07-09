@@ -2,20 +2,19 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from 'react'
+import { homeDir, join } from '@tauri-apps/api/path'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
+  deleteGraph as deleteGraphCommand,
   errorMessage,
   forgetRecent,
   hasBridge,
-  isMobilePlatform,
-  loadSettings,
-  mobileGraphRoot,
+  createGraph,
   openGraph,
   recentGraphs,
   type AppPlatform,
@@ -24,15 +23,25 @@ import {
 } from '@reflect/core'
 import { followHealedMove } from '@/editor/move-note'
 import { resetNoteRowOverlays } from '@/hooks/note-row-overlay'
-import { invalidateIndexQueries } from '@/lib/query-client'
+import { setIndexProgress } from '@/lib/index-progress'
+import { dropIcloudStatusQuery, throttledInvalidateIndexQueries } from '@/lib/query-client'
 import { ensureWelcomeNote } from '@/lib/welcome-note'
-import { useSettings } from '@/providers/settings-provider'
+import { closeSecondaryWindows } from '@/lib/windows/close-secondary-windows'
+import { isMainWindow, requireMainWindow } from '@/lib/windows/window-role'
 import { createGraphIndex } from './graph-index'
+import { useDesktopGraphBoot } from './use-desktop-graph-boot'
+import { useMobileGraphBoot, type MobileGraphBoot } from './use-mobile-graph-boot'
+import { useNoteWindowBoot } from './use-note-window-boot'
 
 /** Lifecycle of the active graph (Plan 02 loading gate). */
 export type GraphStatus = 'loading' | 'choosing' | 'opening' | 'ready'
 
-interface GraphContextValue {
+/**
+ * The graph context surface. The mobile-only slice (`needsOnboarding`,
+ * storage roots, `completeOnboarding`) is documented on
+ * {@link MobileGraphBoot}, whose hook owns it.
+ */
+interface GraphContextValue extends MobileGraphBoot {
   status: GraphStatus
   graph: GraphInfo | null
   recents: RecentGraph[]
@@ -49,40 +58,70 @@ interface GraphContextValue {
   error: string | null
   /** Show the OS folder picker, then open (and bootstrap) the chosen graph. */
   pickAndOpen: () => Promise<void>
+  /** Close the active graph and show the desktop graph chooser. */
+  chooseGraph: () => Promise<void>
+  /**
+   * Create (and open) a graph at an app-chosen absolute path — desktop
+   * onboarding's iCloud path names the folder inside the container instead
+   * of showing a picker. Resolves true only on a confirmed open.
+   */
+  createAt: (root: string) => Promise<boolean>
   /** Open a graph by its root path. Resolves true only when it reached 'ready'. */
   openRecent: (root: string) => Promise<boolean>
   /** Drop a graph from the recents list. */
   forget: (root: string) => Promise<void>
   /**
-   * Mobile only (Plan 19, step 6): the user hasn't yet chosen how to start
-   * (Start fresh / Connect to GitHub), so the fixed root is left untouched and
-   * the onboarding screen is shown instead of the graph. Always false on
-   * desktop, which has its own chooser.
+   * Move the open graph's directory to the OS trash (recoverable), drop it
+   * from recents, and return to the chooser. Throws when the delete fails so
+   * the settings confirm dialog can surface the error. Desktop-only.
    */
-  needsOnboarding: boolean
-  /** Mobile only: the fixed graph root, derived once at bootstrap (null elsewhere). */
-  mobileRoot: string | null
+  deleteGraph: () => Promise<void>
   /**
-   * Mobile only: finish onboarding — open the (now-populated, for the GitHub
-   * path already-cloned) fixed root and persist the onboarded flag so later
-   * launches skip the screen. The GitHub clone must already have landed in the
-   * root before this is called.
+   * Re-run the open graph's background index reconcile. External writers the
+   * watcher can't see (mobile has none; iCloud lands files behind the app's
+   * back) call this after nudging downloads so arrived files get indexed.
+   * No-op while no index is open.
    */
-  completeOnboarding: () => Promise<void>
+  refreshIndex: () => void
 }
 
 const GraphContext = createContext<GraphContextValue | null>(null)
+
+/**
+ * On a macOS first run (no recents yet), start the folder picker in iCloud
+ * Drive — the recommended home for a graph (Plan 21): notes back up
+ * automatically and the iOS app's container lives there too. Suggestion
+ * only: the user can navigate anywhere, and once they have a graph the
+ * picker reverts to the OS default (their last-used location). Best-effort —
+ * a resolution failure (or a signed-out account's missing folder, which the
+ * open panel falls back from on its own) must never block picking.
+ */
+async function pickerDefaultPath(hasRecents: boolean): Promise<{ defaultPath: string } | null> {
+  if (hasRecents || import.meta.env.TAURI_ENV_PLATFORM !== 'darwin') {
+    return null
+  }
+  try {
+    const home = await homeDir()
+    return { defaultPath: await join(home, 'Library', 'Mobile Documents', 'com~apple~CloudDocs') }
+  } catch (err) {
+    console.warn('iCloud Drive picker suggestion failed:', errorMessage(err))
+    return null
+  }
+}
 
 /**
  * Owns the active graph and the open/choose flow. On mount it auto-opens the
  * most-recent graph (so the app reopens where you left off) and otherwise shows
  * the chooser. All durable file access goes through `@reflect/core` commands.
  *
- * On mobile (Plan 19) there is no chooser and no recents-driven reopen: the
- * graph root is fixed (the app's `Documents/`) and is **derived fresh every
- * launch** — iOS container paths change across restore/update, so a persisted
- * recent would point at a dead path. `platform` selects the bootstrap;
- * everything downstream of the open is shared.
+ * On mobile (Plans 19/21) there is no chooser and no recents-driven reopen:
+ * the graph lives in one of two fixed roots — the app's iCloud Drive
+ * container (the recommended default; syncs across devices) or the app
+ * sandbox `Documents/` — and only the *kind* is persisted. Absolute paths are
+ * **derived fresh every launch** because iOS container paths change across
+ * restore/update, so a persisted recent would point at a dead path.
+ * `platform` selects the bootstrap; everything downstream of the open is
+ * shared.
  */
 export function GraphProvider({
   children,
@@ -97,13 +136,6 @@ export function GraphProvider({
   const [indexing, setIndexing] = useState(false)
   const [indexGeneration, setIndexGeneration] = useState<number | null>(null)
   const [error, setError] = useState<string | null>(null)
-  // Mobile onboarding gate (Plan 19, step 6) — inert on desktop.
-  const [needsOnboarding, setNeedsOnboarding] = useState(false)
-  const [mobileRoot, setMobileRoot] = useState<string | null>(null)
-  // Settings live in one place (the app-wide provider, mounted above
-  // PlatformRoot): write the onboarded flag through it so its cached document
-  // carries the flag too — a raw save would be clobbered by the next change.
-  const { updateSettings, whenSettingsLoaded } = useSettings()
   // Monotonic open token: only the most recent open may commit `graph`/`status`,
   // so overlapping opens (double-click, StrictMode remount) can't finish out of
   // order and leave us on a graph the user didn't pick last.
@@ -115,8 +147,17 @@ export function GraphProvider({
   const indexRef = useRef(
     createGraphIndex({
       onError: (stage, err) => console.error(`index ${stage} failed:`, errorMessage(err)),
-      onProgress: (progress) => setIndexing(progress === 'reconciling'),
-      onApplied: invalidateIndexQueries,
+      onProgress: (progress) => {
+        setIndexing(progress === 'reconciling')
+        if (progress !== 'reconciling') {
+          setIndexProgress(null) // the pass finished (or went idle) — clear the pill
+        }
+      },
+      // Applied watcher batches stream every couple of seconds during a bulk
+      // sync — the throttled variant collapses them to one refetch round per
+      // window (an isolated batch still invalidates immediately).
+      onApplied: throttledInvalidateIndexQueries,
+      onFileProgress: (done, total, worked) => setIndexProgress({ done, total, worked }),
       // External renames healed by id follow through to sessions and routes,
       // exactly as for an in-app rename (Plan 17).
       onMoved: followHealedMove,
@@ -148,6 +189,9 @@ export function GraphProvider({
 
   const openRecent = useCallback(
     (root: string): Promise<boolean> => {
+      if (!requireMainWindow('opening a graph')) {
+        return Promise.resolve(false)
+      }
       const seq = ++openSeq.current
       setStatus('opening')
       setError(null)
@@ -157,6 +201,7 @@ export function GraphProvider({
       const run = async (): Promise<boolean> => {
         let opened = false
         try {
+          await closeSecondaryWindows(platform) // before openGraph bumps the session
           const info = await openGraph(root)
           if (seq !== openSeq.current) {
             return false // superseded by a newer open
@@ -227,57 +272,72 @@ export function GraphProvider({
       openChain.current = next
       return next
     },
-    [loadRecents],
+    [loadRecents, platform],
   )
 
-  useEffect(() => {
-    let active = true
-    void (async () => {
-      if (isMobilePlatform(platform)) {
-        // Fixed root, derived fresh (never from recents — see the docblock).
-        try {
-          const root = await mobileGraphRoot()
-          if (!active) {
-            return
-          }
-          setMobileRoot(root)
-          // Gate the first launch on the onboarding choice (Plan 19, step 6).
-          // A missing/false flag is a fresh install: defer the open so the
-          // GitHub path can clone into the still-empty root (`git_clone`
-          // refuses a non-empty directory, and opening here would bootstrap
-          // and seed it). Once onboarded, open the fixed root directly.
-          const onboarded = (await loadSettings()).mobileOnboarded === true
-          if (!active) {
-            return
-          }
-          if (onboarded) {
-            await openRecent(root)
-          } else {
-            setNeedsOnboarding(true)
-            setStatus('choosing')
-          }
-        } catch (err) {
-          if (active) {
-            setError(errorMessage(err))
-            setStatus('choosing')
-          }
-        }
-        return
+  // The mobile bootstrap + onboarding slice (Plans 19/21) lives in its own
+  // hook; `onParked` is its channel back onto this provider's status/error.
+  const onParked = useCallback((parkError: string | null): void => {
+    setError(parkError)
+    setStatus('choosing')
+  }, [])
+  const {
+    needsOnboarding,
+    mobileStorageInfo,
+    mobileStorageResolving,
+    mobileStorageKind,
+    completeOnboarding,
+  } = useMobileGraphBoot({ platform, openRecent, onParked })
+
+  // Secondary note windows never open a graph: they adopt the main window's.
+  useNoteWindowBoot({
+    platform,
+    onAdopted: useCallback((boot) => {
+      setGraph(boot.graph)
+      setIndexGeneration(boot.indexGeneration)
+      setStatus('ready')
+    }, []),
+    onFailed: useCallback((message) => {
+      // Off-main, 'choosing' renders as an error screen (app.tsx), never the
+      // chooser — choosing here would re-root every other window.
+      setError(message)
+      setStatus('choosing')
+    }, []),
+  })
+
+  // Desktop main-window boot: reopen the most recent graph, or show the
+  // chooser. Mobile and note windows boot through their hooks above.
+  useDesktopGraphBoot({
+    platform,
+    loadRecents,
+    openRecent,
+    onChoose: useCallback(() => setStatus('choosing'), []),
+  })
+
+  /**
+   * Create (and open) a graph at an app-chosen path — desktop onboarding's
+   * iCloud path, where the app names the folder inside the container rather
+   * than showing a picker. Same serialized open flow as `openRecent`;
+   * `createGraph` bootstraps the directory first (idempotent when it exists).
+   */
+  const createAt = useCallback(
+    async (root: string): Promise<boolean> => {
+      // Guarded BEFORE createGraph: graph_create activates the shared Rust
+      // session, so off-main it would re-root every window even though the
+      // openRecent below refuses.
+      if (!requireMainWindow('creating a graph')) {
+        return false
       }
-      const list = await loadRecents({ surfaceErrors: true })
-      if (!active) {
-        return
+      try {
+        await createGraph(root)
+      } catch (err) {
+        setError(errorMessage(err))
+        return false
       }
-      if (list.length > 0) {
-        await openRecent(list[0]!.root)
-      } else {
-        setStatus('choosing')
-      }
-    })()
-    return () => {
-      active = false
-    }
-  }, [loadRecents, openRecent, platform])
+      return openRecent(root)
+    },
+    [openRecent],
+  )
 
   const pickAndOpen = useCallback(async (): Promise<void> => {
     let selected: string | null = null
@@ -286,6 +346,7 @@ export function GraphProvider({
         directory: true,
         multiple: false,
         title: 'Choose a graph folder',
+        ...(await pickerDefaultPath(recents.length > 0)),
       })
       selected = typeof result === 'string' ? result : null
     } catch (err) {
@@ -295,7 +356,7 @@ export function GraphProvider({
     if (selected) {
       await openRecent(selected)
     }
-  }, [openRecent])
+  }, [openRecent, recents])
 
   const closeActiveGraph = useCallback(async (): Promise<void> => {
     ++openSeq.current
@@ -308,45 +369,78 @@ export function GraphProvider({
     setStatus('choosing')
   }, [])
 
+  const chooseGraph = useCallback(async (): Promise<void> => {
+    if (!requireMainWindow('switching graphs')) {
+      return
+    }
+    await closeSecondaryWindows(platform) // the session they adopted is ending
+    await closeActiveGraph()
+    await loadRecents({ surfaceErrors: true })
+  }, [closeActiveGraph, loadRecents, platform])
+
   const forget = useCallback(
     async (root: string): Promise<void> => {
       try {
         await forgetRecent(root)
         await loadRecents()
         if (graph?.root === root) {
+          // Forgetting the ACTIVE graph ends the session its note windows
+          // adopted — same close-first rule as switch/delete.
+          await closeSecondaryWindows(platform)
           await closeActiveGraph()
         }
       } catch {
         // best-effort
       }
     },
-    [closeActiveGraph, graph, loadRecents],
+    [closeActiveGraph, graph, loadRecents, platform],
   )
 
-  const completeOnboarding = useCallback(async (): Promise<void> => {
-    if (mobileRoot === null) {
-      throw new Error('No mobile graph root to open')
+  const deleteGraph = useCallback(async (): Promise<void> => {
+    if (!isMainWindow()) {
+      throw new Error('Deleting a graph is only available from the main window.')
     }
-    // Keep the onboarding gate up while the open runs — `openRecent` moves the
-    // status to 'opening' synchronously and the onboarding screen shows its own
-    // pending state, so the shell never flashes. On failure throw rather than
-    // clear the gate: the screen surfaces the error and stays on onboarding for
-    // an in-app retry (Start fresh re-opens an already-cloned root) instead of
-    // landing on the dead-end open-failed screen.
-    const opened = await openRecent(mobileRoot)
-    if (!opened) {
-      throw new Error('Couldn’t open your notes — please try again.')
+    if (graph === null) {
+      return
     }
-    setNeedsOnboarding(false)
-    // Persist the flag only once the graph is actually open, so a failed open
-    // never strands the user past onboarding. Write through the settings
-    // provider (not a raw save), awaiting hydration first — the provider's
-    // contract for a setting paired with a keychain secret (here the GitHub
-    // token): after a failed load it stays session-only and the next launch
-    // re-onboards, where Start fresh re-opens the existing graph (no data loss).
-    await whenSettingsLoaded()
-    updateSettings({ mobileOnboarded: true })
-  }, [mobileRoot, openRecent, updateSettings, whenSettingsLoaded])
+    const { root, generation } = graph
+    // A newer open while the delete is in flight supersedes it (the Rust
+    // side already refuses the stale generation) — never tear down or
+    // re-open the graph the user switched to.
+    const seq = openSeq.current
+    try {
+      await closeSecondaryWindows(platform) // before the delete invalidates the session
+      await deleteGraphCommand(generation)
+    } catch (err) {
+      // The command invalidates the Rust session before touching the
+      // filesystem, so a failed trash leaves the directory intact but the
+      // session pin dead — re-open the graph to restore a writable session,
+      // then let the confirm dialog surface the error.
+      if (seq === openSeq.current) {
+        await openRecent(root)
+      }
+      throw err
+    }
+    // The delete trashed a directory the chooser may list — drop the cached
+    // iCloud listing so the chooser refetches it rather than showing the
+    // deleted graph (queries never go stale on their own, see query-client).
+    dropIcloudStatusQuery()
+    if (seq === openSeq.current) {
+      await closeActiveGraph()
+    }
+    await loadRecents()
+  }, [closeActiveGraph, graph, loadRecents, openRecent, platform])
+
+  const refreshIndex = useCallback((): void => {
+    // Off-main, a refresh would start a second concurrent index writer.
+    if (indexGeneration === null || !isMainWindow()) {
+      return
+    }
+    // The index lifecycle coalesces stacked triggers (resume + poll-end +
+    // watch-failed can fire together) into a single queued rerun.
+    const seq = openSeq.current
+    indexRef.current.refresh(indexGeneration, () => seq !== openSeq.current)
+  }, [indexGeneration])
 
   const value = useMemo<GraphContextValue>(
     () => ({
@@ -357,11 +451,17 @@ export function GraphProvider({
       indexing,
       error,
       pickAndOpen,
+      chooseGraph,
+      createAt,
       openRecent,
       forget,
+      deleteGraph,
       needsOnboarding,
-      mobileRoot,
+      mobileStorageInfo,
+      mobileStorageResolving,
+      mobileStorageKind,
       completeOnboarding,
+      refreshIndex,
     }),
     [
       status,
@@ -371,11 +471,17 @@ export function GraphProvider({
       indexing,
       error,
       pickAndOpen,
+      chooseGraph,
+      createAt,
       openRecent,
       forget,
+      deleteGraph,
       needsOnboarding,
-      mobileRoot,
+      mobileStorageInfo,
+      mobileStorageResolving,
+      mobileStorageKind,
       completeOnboarding,
+      refreshIndex,
     ],
   )
 

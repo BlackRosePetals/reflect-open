@@ -138,6 +138,18 @@ function decodeAssetPath(href: string): string {
   return segments.join('/')
 }
 
+/**
+ * The canonical on-disk path for an asset href, or `null` when the href is
+ * not an asset link at all. The public entry point for callers holding an
+ * href copied from raw markdown — e.g. the chat read_assets tool, whose
+ * model-supplied paths are the verbatim link targets from note bodies —
+ * applying the same {@link decodeAssetPath} rule the index projection uses,
+ * so every spelling resolves to the indexed key.
+ */
+export function canonicalAssetPath(href: string): string | null {
+  return isAssetHref(href) ? decodeAssetPath(href) : null
+}
+
 function stringField(frontmatter: Frontmatter, key: string): string | undefined {
   const value = (frontmatter as Record<string, unknown>)[key]
   return typeof value === 'string' ? value : undefined
@@ -167,10 +179,20 @@ function readLink(body: string, from: number, to: number, offset: number): Markd
 }
 
 /**
+ * A Reflect task is the round Meowdown checkbox syntax: optional indentation,
+ * then `+`, then whitespace, then the GFM marker. Square checklist items
+ * (`- [ ]`/`* [ ]`) are intentionally not projected into Tasks.
+ */
+function hasRoundTaskListMarker(body: string, markerStart: number): boolean {
+  const lineStart = body.lastIndexOf('\n', markerStart - 1) + 1
+  return /^[\t ]*\+[\t ]+$/.test(body.slice(lineStart, markerStart))
+}
+
+/**
  * Resolve a `Task` Lezer node (the marker starts at `from`) into a
- * {@link ParsedTask}, or `null` when the marker shape isn't a real GFM checkbox
- * (a defensive guard against parser surprises). `text` is the marker line minus
- * its syntax; `raw` is that physical line verbatim for the write-back guard.
+ * {@link ParsedTask}, or `null` when the marker shape isn't Reflect's task
+ * syntax. `text` is the marker line minus its syntax; `raw` is that physical
+ * line verbatim from the marker onward for the write-back guard.
  */
 function readTask(
   body: string,
@@ -181,6 +203,9 @@ function readTask(
   wikiLinks: WikiLink[],
 ): ParsedTask | null {
   const { from, to } = range
+  if (!hasRoundTaskListMarker(body, from)) {
+    return null
+  }
   const marker = parseTaskMarker(body.slice(from, from + 3))
   if (marker === null) {
     return null
@@ -326,8 +351,9 @@ export function parseNote(input: { path: string; source: string }): ParsedNote {
       if (name === 'Link' || name === 'Image') {
         const link = readLink(body, from, to, bodyOffset)
         if (link) {
-          if (isAssetHref(link.href)) {
-            assets.push({ path: decodeAssetPath(link.href), from: link.from, to: link.to })
+          const assetPath = canonicalAssetPath(link.href)
+          if (assetPath !== null) {
+            assets.push({ path: assetPath, from: link.from, to: link.to })
           } else {
             links.push(link)
           }

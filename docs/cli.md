@@ -11,6 +11,7 @@ reflect today --path       # its absolute path (works before the file exists)
 reflect search <query>     # ranked full-text search over the index
 reflect show <note>        # print a note by date, path, title, or alias
 reflect path <note>        # resolve a note to its absolute path
+reflect open <note>        # open a note in the app (reflect:// deep link)
 ```
 
 Built from `apps/cli` (`cargo build -p reflect-cli`); bundled with the desktop
@@ -105,7 +106,8 @@ Resolves `<note>` and prints the raw markdown. Resolution order:
 2. An explicit path (graph-relative like `notes/foo.md`, or absolute inside
    the graph).
 3. A title match (case-insensitive, trimmed).
-4. An alias match (from `aliases:` frontmatter).
+4. An alias match (from `aliases:` frontmatter, or a v1 subject-alias
+   segment of a `//` title like `Charlotte MacCaw // Mum`).
 
 Works with or without the index — when the index is missing, titles/aliases
 are derived by scanning the files. Ambiguous matches resolve to the first path
@@ -127,13 +129,39 @@ prints the would-be daily path even before the file exists.
 { "date": "2099-01-01", "path": "daily/2099-01-01.md", "absolutePath": "…", "exists": false }
 ```
 
+### `reflect open <note> [--print] [--json]`
+
+Same resolution, then navigates the Reflect app there by handing the OS URL
+opener the note's `reflect://` deep link ([docs/deep-links.md](deep-links.md)).
+The URL prefers the most durable address the note has: the date form for
+dailies (which need not exist yet — navigation creates them lazily), the
+frontmatter `id` form when the note carries one (it survives renames), else
+the graph-relative path form. The CLI never writes, so it does not mint ids —
+"Copy deep link" in the app does that.
+
+The URL is always printed to stdout; `--print` skips launching the opener —
+the scriptable half. Private notes are refused (exit `3`) like every other
+CLI surface, before their address leaks.
+
+```jsonc
+// reflect open "Project X" --json --print   ("date" only appears for dailies)
+{ "path": "notes/project-x.md", "url": "reflect://note/01hzy3…", "launched": false }
+```
+
 ## For agents
 
-The four commands plus `--json` are the supported automation surface (e.g.
+The five commands plus `--json` are the supported automation surface (e.g.
 `~/.agents` discovery workflows). The JSON field names and exit codes above
 are stable; new fields may be added, existing ones won't change meaning.
 Reading a private note is not possible through this surface by design — don't
 work around it by reading graph files directly unless the user asked for that.
+
+Settings → Agents installs a per-graph agent skill
+(`~/.agents/skills/reflect-<graph-slug>/SKILL.md`) that teaches coding agents
+this contract: the graph's root, the bundled CLI's path, the commands, and
+the privacy rules. The file carries a `reflect-managed` sha256 marker so the
+app can refresh its own installs without ever overwriting a hand-edited one
+(`apps/desktop/src-tauri/src/skill.rs`).
 
 ## Development notes
 

@@ -8,19 +8,28 @@
 //! [`recents`] (recent-graphs store), [`settings`] (user settings store),
 //! [`secrets`] (OS keychain), [`git`] (backup/sync primitives),
 //! [`capture`] (link-capture inbox + native-messaging host plumbing),
+//! [`skill`] (per-graph agent-skill install under `~/.agents/skills/`),
+//! [`calendar`] (read-only Apple Calendar access),
+//! [`contacts`] (live Apple Contacts lookups),
 //! [`error`] (the shared error contract).
 
+mod calendar;
 mod capture;
+mod conflict;
+mod contacts;
 mod db;
 mod devtools;
 mod error;
 mod fs;
 mod git;
 mod graph_gitignore;
+mod icloud;
 mod quit;
 mod recents;
 mod secrets;
 mod settings;
+mod skill;
+mod windows;
 
 // The watcher and the embedding runtime are desktop capabilities (Plan 19):
 // mobile swaps in stand-ins with the identical command surface, so the
@@ -65,29 +74,6 @@ fn app_platform() -> &'static str {
     }
 }
 
-/// The fixed mobile graph root (Plan 19): the app's `Documents/` directory,
-/// exposed in the iOS Files app. Derived fresh on every call — iOS container
-/// paths embed a UUID that changes across restore/update, so the frontend
-/// must never persist the absolute path it gets back.
-#[tauri::command]
-fn mobile_graph_root(app: tauri::AppHandle) -> Result<String, error::AppError> {
-    #[cfg(mobile)]
-    {
-        let dir = app
-            .path()
-            .document_dir()
-            .map_err(|err| error::AppError::io(format!("no documents directory: {err}")))?;
-        Ok(dir.to_string_lossy().into_owned())
-    }
-    #[cfg(desktop)]
-    {
-        let _ = app; // desktop picks graph folders; there is no fixed root
-        Err(error::AppError::Unknown {
-            message: "mobile_graph_root is mobile-only".into(),
-        })
-    }
-}
-
 /// Route `tracing` output to stderr, honoring `RUST_LOG` (default `info`).
 fn init_tracing() {
     use tracing_subscriber::EnvFilter;
@@ -99,10 +85,44 @@ fn init_tracing() {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_tracing();
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    // Single-instance must be the first plugin so a second launch is caught
+    // before any other state spins up: its `deep-link` feature hands the
+    // launching instance's `reflect://` URL to the deep-link plugin, and the
+    // callback re-focuses the running window. macOS delivers scheme opens to
+    // the running app natively; this is the Windows/Linux equivalent.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        if let Some(window) = app.get_webview_window(windows::MAIN_WINDOW_LABEL) {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
+
+    let builder = builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_http::init());
+
+    // Deep links (`reflect://`) are desktop-only for now: the scheme is
+    // registered at bundle time (`plugins.deep-link` in tauri.conf.json) and
+    // the frontend consumes URLs through `onOpenUrl`.
+    #[cfg(desktop)]
+    let builder = builder.plugin(tauri_plugin_deep_link::init());
+
+    // Where the bundle doesn't register the scheme, do it at runtime: Linux
+    // desktop entries, and Windows dev builds (the installer writes the
+    // registry keys in production; macOS reads CFBundleURLTypes). Best-effort
+    // — a headless Linux box without xdg-mime must not fail the launch.
+    #[cfg(any(target_os = "linux", all(windows, debug_assertions)))]
+    let builder = builder.setup(|app| {
+        use tauri_plugin_deep_link::DeepLinkExt;
+        if let Err(err) = app.deep_link().register_all() {
+            tracing::warn!(error = %err, "deep-link scheme registration failed");
+        }
+        Ok(())
+    });
 
     // Auto-update is desktop-only: updates verify against the minisign pubkey
     // in tauri.conf.json (`plugins.updater`), and `process` provides the
@@ -116,13 +136,28 @@ pub fn run() {
     let builder = builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build());
+        .plugin(
+            // Note windows are excluded from state tracking: they cascade
+            // fresh from their opener, and their content-hashed labels would
+            // otherwise accrete in the state file forever.
+            tauri_plugin_window_state::Builder::default()
+                .with_filter(|label| !label.starts_with(windows::NOTE_WINDOW_PREFIX))
+                .build(),
+        );
 
     // The keyboard bridge (Plan 19, decision 8) is mobile-only: desktop has
     // no software keyboard to track. (Sharing uses the webview's Web Share
-    // API, so it needs no native plugin.)
+    // API, so it needs no native plugin; haptics ride this plugin's
+    // `impact_light` command.)
     #[cfg(mobile)]
     let builder = builder.plugin(tauri_plugin_keyboard::init());
+
+    // The native audio-memo recorder is mobile-only too: desktop records
+    // through the webview's MediaRecorder (`use-audio-recorder.ts`), while
+    // mobile capture must survive the webview (interruptions, backgrounding),
+    // so it runs on AVAudioRecorder behind this plugin.
+    #[cfg(mobile)]
+    let builder = builder.plugin(tauri_plugin_recording::init());
 
     // The main window starts hidden (`visible: false`); on desktop the
     // window-state plugin reveals it after restoring geometry, but mobile has
@@ -132,7 +167,7 @@ pub fn run() {
     // line with the spike, but keep the window show.)
     #[cfg(mobile)]
     let builder = builder.setup(|app| {
-        if let Some(window) = app.get_webview_window("main") {
+        if let Some(window) = app.get_webview_window(windows::MAIN_WINDOW_LABEL) {
             window.show()?;
         }
         spike_mobile::run_self_check(app.handle());
@@ -140,22 +175,51 @@ pub fn run() {
     });
 
     builder
+        // Serves note images (`assets/…`) to the webview. Registered as an
+        // *asynchronous* protocol on purpose: WebKit delivers custom-scheme
+        // requests on the main thread, and a synchronous handler (like the
+        // built-in `asset:` protocol this replaces) freezes the whole app for
+        // the duration of every uncached read — seconds on iOS, where a first
+        // read can wait on an iCloud download.
+        .register_asynchronous_uri_scheme_protocol(
+            fs::asset_protocol::SCHEME,
+            fs::asset_protocol::handle,
+        )
         .manage(fs::GraphState::default())
+        .manage(fs::ImportCancel::default())
+        .manage(fs::assets::AssetUploads::default())
         .manage(db::IndexState::default())
         .manage(watcher::WatcherState::default())
         .manage(quit::QuitState::default())
+        .manage(windows::WindowInit::default())
         .manage(embed::EmbedState::default())
         .invoke_handler(tauri::generate_handler![
             app_version,
             app_platform,
-            mobile_graph_root,
+            icloud::storage::mobile_storage,
+            icloud::storage::mobile_storage_local,
+            icloud::storage::icloud_download_pending,
+            icloud::storage::icloud_pending_count,
+            icloud::storage::icloud_status,
+            icloud::storage::icloud_adopt_graph,
+            icloud::sweep::icloud_conflicts_scan,
+            icloud::watch::icloud_watch_start,
+            icloud::watch::icloud_watch_stop,
             fs::graph_open,
             fs::graph_create,
+            fs::graph_delete,
+            fs::graph_import_reflect_v1_zip,
+            fs::graph_import_cancel,
             fs::note_read,
             fs::note_write,
             fs::asset_write,
             fs::asset_read,
             fs::asset_open,
+            fs::assets::asset_upload_begin,
+            fs::assets::asset_upload_append,
+            fs::assets::asset_upload_commit,
+            fs::assets::asset_upload_abort,
+            fs::assets::asset_import,
             fs::dir_list,
             fs::note_exists,
             fs::note_delete,
@@ -164,6 +228,9 @@ pub fn run() {
             recents::forget_recent,
             settings::settings_load,
             settings::settings_save,
+            skill::skill_status,
+            skill::skill_install,
+            skill::skill_uninstall,
             secrets::secret_set,
             secrets::secret_get,
             secrets::secret_delete,
@@ -173,6 +240,8 @@ pub fn run() {
             db::index_remove,
             db::index_clear,
             db::index_move,
+            db::index_reconcile_scan,
+            db::index_touch,
             db::note_move_indexed,
             db::index_meta_set,
             db::db_query,
@@ -185,11 +254,21 @@ pub fn run() {
             embed::embed_texts,
             watcher::watch_start,
             watcher::watch_stop,
+            calendar::calendar_authorization_status,
+            calendar::calendar_request_access,
+            calendar::calendar_list_calendars,
+            calendar::calendar_list_events,
+            contacts::contacts_authorization_status,
+            contacts::contacts_request_access,
+            contacts::contacts_lookup_by_email,
+            contacts::contacts_lookup_by_name,
             capture::capture_host_register,
             capture::capture_inbox_list,
+            capture::capture_inbox_spool,
             capture::capture_inbox_read,
             capture::capture_inbox_remove,
             capture::capture_inbox_reject,
+            capture::capture_shared_inbox_relay,
             capture::capture_screenshot_promote,
             capture::capture_meta_fetch,
             git::git_status,
@@ -201,22 +280,84 @@ pub fn run() {
             git::git_merge_remote,
             git::git_push,
             quit::quit_confirm,
+            windows::open_note_window,
+            windows::window_bootstrap,
+            windows::close_note_windows,
             devtools::toggle_devtools,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::ExitRequested { code, api, .. } = &event {
-                // A user/OS-initiated quit (⌘Q — no exit code) with a live
-                // webview defers once so the frontend can flush dirty note
-                // buffers (`app:quit-requested` → `quit_confirm`). An exit
-                // carrying a code is the confirm itself; with no webview left
-                // the window-close path has already flushed.
+        .run(|app, event| match &event {
+            // The lock-screen widget opens `reflect://record-audio`; hand it
+            // to the recording plugin's persisted action queue (the V1
+            // handshake) so the request survives webview churn and cold
+            // starts. Desktop scheme opens flow through
+            // tauri-plugin-deep-link to the frontend instead.
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            tauri::RunEvent::Opened { urls } => {
+                #[cfg(mobile)]
+                for url in urls {
+                    if url.scheme() == "reflect" && url.host_str() == Some("record-audio") {
+                        // This callback runs on the main thread, and
+                        // `run_mobile_plugin` blocks its caller until the
+                        // Swift command resolves — which `queueAction` does
+                        // from the main queue. Calling it inline deadlocks
+                        // the main thread (the watchdog then kills the app),
+                        // so queue from a worker thread instead.
+                        let app = app.clone();
+                        tauri::async_runtime::spawn_blocking(move || {
+                            use tauri_plugin_recording::RecordingExt;
+                            if let Err(err) = app.recording().queue_action("recordAudio") {
+                                tracing::warn!(error = %err, "queueing the record-audio action failed");
+                            }
+                        });
+                    }
+                }
+                #[cfg(not(mobile))]
+                let _ = urls;
+            }
+            tauri::RunEvent::ExitRequested { code, api, .. } => {
+                // A user/OS-initiated quit (⌘Q — no exit code) with live
+                // webviews defers so the frontend can flush dirty note
+                // buffers (`app:quit-requested` → `quit_confirm`). The
+                // handshake is armed with the webview count: every window
+                // flushes its own buffers, and only the last confirmation
+                // exits (quit.rs). An exit carrying a code is that final
+                // confirm itself; with no webview left the window-close path
+                // has already flushed.
                 let quit = app.state::<quit::QuitState>();
-                if code.is_none() && !quit.flushed() && !app.webview_windows().is_empty() {
+                let windows: Vec<String> = app.webview_windows().keys().cloned().collect();
+                if code.is_none() && !windows.is_empty() {
                     api.prevent_exit();
+                    quit.arm(windows);
                     let _ = app.emit("app:quit-requested", ());
                 }
             }
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::Destroyed,
+                ..
+            } => {
+                // A window destroyed mid-handshake (user closed it while the
+                // quit flush ran) can no longer confirm — settle its label or
+                // the surviving windows' quit would hang forever.
+                let quit = app.state::<quit::QuitState>();
+                if quit.settle(label) {
+                    app.exit(0);
+                }
+                // Note windows adopt the main window's graph session and
+                // degrade silently without it (no indexing, sync, or rename
+                // propagation) — they close with their owner. `close()`, not
+                // `destroy()`: each child's close-requested flush still runs,
+                // exactly like ⌘W (docs/multi-window.md).
+                if label == windows::MAIN_WINDOW_LABEL {
+                    for (child_label, child) in app.webview_windows() {
+                        if child_label.starts_with(windows::NOTE_WINDOW_PREFIX) {
+                            let _ = child.close();
+                        }
+                    }
+                }
+            }
+            _ => {}
         });
 }

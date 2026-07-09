@@ -315,7 +315,7 @@ Notes with `private: true` are hard-blocked from cloud AI. They may remain local
 
 ### BYOK First
 
-V2 should start with bring-your-own-key AI. (As shipped: OpenAI, Anthropic, and Google keys, stored in the OS keychain.)
+V2 should start with bring-your-own-key AI. (As shipped: OpenAI, Anthropic, Google, and OpenRouter keys, stored in the OS keychain.)
 
 The architecture should leave room for:
 
@@ -445,6 +445,13 @@ Windows and Android should remain possible. The implementation should avoid choi
 > (see Plan 12); the adapter list below is the long-term direction. AI-assisted conflict
 > resolution did not ship — conflicts surface as reviewable conflict markers with
 > mine/theirs/both resolution.
+>
+> **Update (2026-07-04):** [Plan 21](./plans/21-icloud-drive-sync.md) shipped
+> **iCloud Drive as the primary consumer sync path** — the app's own container,
+> iCloud-first onboarding on macOS and iOS, and deterministic on-device conflict
+> resolution (see [icloud-sync.md](./icloud-sync.md)). Git remains the
+> self-managed adapter; a graph syncs via iCloud *or* a Git remote, never both.
+> AI-assisted resolution stays deferred.
 
 V2 should make backup free and understandable.
 
@@ -521,7 +528,7 @@ These may come later, but should not define the first wave:
 
 | Feature                  | V2 stance                                                                                                          |
 | ------------------------ | ------------------------------------------------------------------------------------------------------------------ |
-| Tasks                    | Defer from the first release; now planned as a post-release add-on (Plan 18): GFM-checkbox tasks as a lightweight markdown-backed projection. |
+| Tasks                    | Defer from the first release; now planned as a post-release add-on (Plan 18): round-checkbox (`+ [ ]`) tasks as a lightweight markdown-backed projection. |
 | Audio transcription      | **Shipped early** (despite this table): raw-first audio memos with async BYOK cloud transcription and `private: true` lockouts. |
 | Full browser clipper     | Defer beyond launch link capture. Article extraction, read-later state, and broad clipping can come later.         |
 | Graph/map view           | Defer. Keep backlink graph data, but visual map is not first-wave.                                                 |

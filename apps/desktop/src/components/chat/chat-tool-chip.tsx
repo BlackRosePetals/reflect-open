@@ -1,9 +1,10 @@
 import { Fragment, type ReactElement, type ReactNode } from 'react'
-import { CalendarDays, FileText, History, Search } from 'lucide-react'
+import { CalendarDays, FileText, History, Paperclip, Search } from 'lucide-react'
 import { isTagName, isToolPending, type AssistantPart, type NoteHitSummary } from '@reflect/core'
+import { Marker, MarkerContent, MarkerIcon } from '@/components/ui/marker'
+import { Spinner } from '@/components/ui/spinner'
 import { routeForPath } from '@/routing/route'
 import { useRouter } from '@/routing/router'
-import { Spinner } from '@/components/ui/spinner'
 
 interface ChatToolChipProps {
   part: Extract<AssistantPart, { kind: 'tool' }>
@@ -14,19 +15,24 @@ function countSuffix(count: number, noun: string): string {
   return ` · ${count} ${noun}${count === 1 ? '' : 's'}`
 }
 
+/** An asset chip labels entries by filename — the path adds only noise. */
+function assetName(path: string): string {
+  return path.split('/').pop() ?? path
+}
+
 interface ChipFrameProps {
   pending: boolean
   icon: ReactElement
   children: ReactNode
 }
 
-/** The shared chip shell: a spinner while pending, the tool's icon after. */
+/** The shared marker shell: a spinner while pending, the tool's icon after. */
 function ChipFrame({ pending, icon, children }: ChipFrameProps): ReactElement {
   return (
-    <span className="flex items-center gap-1.5 text-xs text-text-muted">
-      {pending ? <Spinner /> : icon}
-      {children}
-    </span>
+    <Marker className="text-xs text-text-muted">
+      <MarkerIcon>{pending ? <Spinner /> : icon}</MarkerIcon>
+      <MarkerContent className="truncate">{children}</MarkerContent>
+    </Marker>
   )
 }
 
@@ -76,11 +82,9 @@ export function ChatToolChip({ part }: ChatToolChipProps): ReactElement {
     const result = part.result?.tool === 'search' ? part.result : null
     return (
       <ChipFrame pending={pending} icon={<Search aria-hidden className="size-3.5" />}>
-        <span className="truncate">
-          Searched “{call.query}”
-          {result !== null ? countSuffix(result.hits.length, 'note') : ''}
-          {result !== null ? <NoteLinks notes={result.hits} onOpen={openNote} /> : null}
-        </span>
+        Searched “{call.query}”
+        {result !== null ? countSuffix(result.hits.length, 'note') : ''}
+        {result !== null ? <NoteLinks notes={result.hits} onOpen={openNote} /> : null}
       </ChipFrame>
     )
   }
@@ -101,17 +105,15 @@ export function ChatToolChip({ part }: ChatToolChipProps): ReactElement {
       )
     return (
       <ChipFrame pending={pending} icon={<History aria-hidden className="size-3.5" />}>
-        <span className="truncate">
-          Listed {tagLabel} notes
-          {result !== null
-            ? result.error !== null
-              ? ` — ${result.error}`
-              : countSuffix(result.notes.length, 'note')
-            : ''}
-          {result !== null && result.error === null ? (
-            <NoteLinks notes={result.notes} onOpen={openNote} />
-          ) : null}
-        </span>
+        Listed {tagLabel} notes
+        {result !== null
+          ? result.error !== null
+            ? ` — ${result.error}`
+            : countSuffix(result.notes.length, 'note')
+          : ''}
+        {result !== null && result.error === null ? (
+          <NoteLinks notes={result.notes} onOpen={openNote} />
+        ) : null}
       </ChipFrame>
     )
   }
@@ -120,11 +122,38 @@ export function ChatToolChip({ part }: ChatToolChipProps): ReactElement {
     const result = part.result?.tool === 'dailies' ? part.result : null
     return (
       <ChipFrame pending={pending} icon={<CalendarDays aria-hidden className="size-3.5" />}>
-        <span className="truncate">
-          Listed daily notes {call.start} – {call.end}
-          {result !== null ? countSuffix(result.days.length, 'day') : ''}
-          {result !== null ? <NoteLinks notes={result.days} onOpen={openNote} /> : null}
-        </span>
+        Listed daily notes {call.start} – {call.end}
+        {result !== null ? countSuffix(result.days.length, 'day') : ''}
+        {result !== null ? <NoteLinks notes={result.days} onOpen={openNote} /> : null}
+      </ChipFrame>
+    )
+  }
+
+  // read_assets: one chip for the whole batch of attachment descriptions.
+  // Assets have no note route, so entries stay plain text with per-asset
+  // refusals inline.
+  if (call.tool === 'assets') {
+    const result = part.result?.tool === 'assets' ? part.result : null
+    if (part.error !== null) {
+      return (
+        <ChipFrame pending={false} icon={<Paperclip aria-hidden className="size-3.5" />}>
+          {call.paths.map(assetName).join(', ')} — {part.error}
+        </ChipFrame>
+      )
+    }
+    const assets = result?.assets ?? call.paths.map((path) => ({ path, error: null }))
+    return (
+      <ChipFrame pending={pending} icon={<Paperclip aria-hidden className="size-3.5" />}>
+        Read{' '}
+        {assets.map((asset, index) => (
+          <Fragment key={`${asset.path}-${index}`}>
+            {index > 0 ? ', ' : ''}
+            <span>
+              {assetName(asset.path)}
+              {asset.error !== null ? ` — ${asset.error}` : ''}
+            </span>
+          </Fragment>
+        ))}
       </ChipFrame>
     )
   }
@@ -135,9 +164,7 @@ export function ChatToolChip({ part }: ChatToolChipProps): ReactElement {
   if (part.error !== null) {
     return (
       <ChipFrame pending={false} icon={<FileText aria-hidden className="size-3.5" />}>
-        <span className="truncate">
-          {call.paths.join(', ')} — {part.error}
-        </span>
+        {call.paths.join(', ')} — {part.error}
       </ChipFrame>
     )
   }
@@ -145,31 +172,29 @@ export function ChatToolChip({ part }: ChatToolChipProps): ReactElement {
   const notes = result?.notes ?? call.paths.map((path) => ({ path, title: null, error: null }))
   return (
     <ChipFrame pending={pending} icon={<FileText aria-hidden className="size-3.5" />}>
-      <span className="truncate">
-        Read{' '}
-        {notes.map((note, index) => {
-          const label = note.title ?? note.path
-          return (
-            <Fragment key={`${note.path}-${index}`}>
-              {index > 0 ? ', ' : ''}
-              {!pending && note.error === null ? (
-                <button
-                  type="button"
-                  onClick={() => openNote(note.path)}
-                  className="underline-offset-2 hover:text-text hover:underline"
-                >
-                  {label}
-                </button>
-              ) : (
-                <span>
-                  {label}
-                  {note.error !== null ? ` — ${note.error}` : ''}
-                </span>
-              )}
-            </Fragment>
-          )
-        })}
-      </span>
+      Read{' '}
+      {notes.map((note, index) => {
+        const label = note.title ?? note.path
+        return (
+          <Fragment key={`${note.path}-${index}`}>
+            {index > 0 ? ', ' : ''}
+            {!pending && note.error === null ? (
+              <button
+                type="button"
+                onClick={() => openNote(note.path)}
+                className="underline-offset-2 hover:text-text hover:underline"
+              >
+                {label}
+              </button>
+            ) : (
+              <span>
+                {label}
+                {note.error !== null ? ` — ${note.error}` : ''}
+              </span>
+            )}
+          </Fragment>
+        )
+      })}
     </ChipFrame>
   )
 }

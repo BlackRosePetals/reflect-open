@@ -2,7 +2,6 @@ import type { ReactElement } from 'react'
 import type { GraphInfo } from '@reflect/core'
 import { PanelLeft } from 'lucide-react'
 import { AppShell } from '@/components/app-shell'
-import { CloudSyncBanner } from '@/components/cloud-sync-banner'
 import { CommandPalette } from '@/components/command-palette/command-palette'
 import { DailyContextSidebar } from '@/components/context-sidebar/daily-context-sidebar'
 import { NoteContextSidebar } from '@/components/context-sidebar/note-context-sidebar'
@@ -13,6 +12,8 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { RouteContent } from '@/components/route-content'
 import { ShortcutsDialog } from '@/components/shortcuts-dialog'
 import { Sidebar } from '@/components/sidebar/sidebar'
+import { TemplateCreateDialog } from '@/components/templates/template-create-dialog'
+import { TemplatePicker } from '@/components/templates/template-picker'
 import { keybindingFor } from '@/lib/commands/app-commands'
 import { cn } from '@/lib/utils'
 import { hasMacosTitleBarOverlay } from '@/lib/window-chrome'
@@ -85,14 +86,14 @@ export function WorkspaceContent({ graph }: WorkspaceContentProps): ReactElement
           </Tooltip>
         ) : null}
 
-        {graph.cloudSync ? <CloudSyncBanner provider={graph.cloudSync} /> : null}
-
         <div className="min-h-0 flex-1">
           <RouteContent />
         </div>
 
         <CommandPalette context={commandContext} />
         <ShortcutsDialog />
+        <TemplatePicker context={commandContext} />
+        <TemplateCreateDialog context={commandContext} />
         <EmbeddingsSync />
       </div>
     </AppShell>

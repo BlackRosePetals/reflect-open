@@ -24,6 +24,16 @@ fallback with explicit triggers.
 > note actions, share helper, and settings sheet exist. Still open: physical-device
 > editing validation, full GitHub-connect restore polish on mobile, foreground-sync
 > product hardening, TestFlight/App Store packaging, and Android follow-through.
+>
+> **Update (2026-07-05):** several scope lines below were superseded by later ships.
+> [Plan 21](./21-icloud-drive-sync.md) made iCloud Drive the primary storage/sync
+> path: onboarding is now iCloud-first (lists every container graph; keep-on-device
+> and GitHub behind it), `mobile_storage` replaced `mobile_graph_root`, and the
+> settings sheet grew a **Switch graph** section — so "one graph per device / no
+> iCloud containers" no longer holds (one graph *open* at a time still does). The
+> formatting toolbar shipped **webview-drawn** (decision 8), spike B passed with
+> meowdown on device, mobile conflict resolution shipped (mine/theirs/both), and
+> the TestFlight flow exists ([docs/ios-testflight.md](../ios-testflight.md)).
 
 **Depends on:** Plans 02–05 (graph/storage, document model, index, **editor**),
 06 (daily notes/route model), 07 (backlinks/autocomplete), 08 (lexical
@@ -76,9 +86,6 @@ filenames — the title-rename machinery rides along with editing).
 - Audio memos, link capture, share-sheet capture (share *target* needs its own
   native plugin — later).
 - Multiple graphs, graph chooser, folder pickers, iCloud Drive containers.
-- Conflict *resolution*: conflicted notes surface as "Needs review on desktop"
-  and open protected (read-only) — exactly the desktop session contract; only
-  the mine/theirs/both resolution UI stays desktop in v1.
 - Background sync (BGTaskScheduler), push notifications, widgets, auto-update
   (app stores own updates; the updater plugin is already desktop-gated).
 - Full keyboard-shortcut surfaces (⌘K palette), a native formatting accessory
@@ -253,13 +260,25 @@ tested with the editor spike. No accessory-bar class-swizzling (a V1-mobile
 lesson — that path was brittle); a webview-drawn formatting bar can come
 later on the height events.
 
+> **Refined 2026-07-02 (PR #477): the shell yields by height, not padding.**
+> Per-container `max(safe-area, keyboard)` padding fixed scroll reach but
+> left the *layout* (and floating-ui's positioning boundary) extending under
+> the keyboard, so every floating surface — the `[[` autocomplete first —
+> needed its own fitting workaround. Instead, the mobile shell root is
+> `calc(100dvh - var(--keyboard-height))`: one yield point, correct popup
+> positioning for free, containers keep plain safe-area padding, and only
+> `position: fixed` elements (viewport-anchored) read the variable directly.
+> The tab bar hides while the keyboard is up — V1 let the keyboard cover it,
+> and above the keyboard it would just eat typing space.
+
 ### 9. App identity & store
 
-The bundle identifier and `ios.project.yml` predate this plan
-(`com.alex.reflect-open` prefix, placeholder product name) — step 3 normalizes
-them to the product identity (`app.reflect.*`, product name "Reflect") before
-anything ships to TestFlight. Versioning tracks the desktop `version` in
-`tauri.conf.json`. Store metadata, privacy nutrition labels
+The iOS template now carries the product identity (`app.reflect.ios`, product
+name "Reflect", team `789ULN5MZB`) and `tauri.ios.conf.json` keeps the mobile
+bundle identifier separate from the desktop app. Versioning tracks the desktop
+`version` in `tauri.conf.json`; TestFlight builds use `pnpm release:ios` to add
+the per-upload build number and pass App Store Connect API key authentication
+through to xcodebuild/altool. Store metadata, privacy nutrition labels
 (`PrivacyInfo.xcprivacy` is required for fs access), and a review-account
 story (a demo graph — the app is fully usable with no account; reviewers must
 see that) land with the submission step.
@@ -357,12 +376,11 @@ Steps 1 and 2 are the existential gates; nothing else starts until both pass.
    iOS WKWebView, so no native plugin — and trash).
 10. **Sync wiring.** Resume/edit/online triggers, background-flush + local
     commit on pause, `onRemoteChanges` reindex (unchanged), conflicted notes
-    protected with "Needs review on desktop", status pill live.
+    protected with raw-marker resolution actions, status pill live.
 11. **Harden + ship.** Memory pass on a large graph (webview process limits;
     editing a very large note), resume-after-process-death recovery check,
-    a11y labels, TestFlight build (`tauri ios build --export-method
-    app-store-connect`, App Store Connect API key in CI mirroring the macOS
-    release workflow), then App Store submission with the review story.
+    a11y labels, TestFlight build (`pnpm release:ios testflight`; see
+    `docs/ios-testflight.md`), then App Store submission with the review story.
 12. **Android (fast follow, same shape).** `tauri android init`, Kotlin half
     of the keyboard plugin, keystore signing, the same frontend gate already
     matching `'android'`, Play submission. No new product surface.
@@ -370,8 +388,9 @@ Steps 1 and 2 are the existential gates; nothing else starts until both pass.
 ## Acceptance criteria
 
 - `pnpm tauri ios dev` runs the mobile app in the simulator from a clean
-  checkout; `pnpm tauri dev` (desktop) is unaffected; `cargo test -p
-  reflect-open` and the TS suites stay green.
+  checkout (see [the simulator runbook](../contributing/mobile-simulator.md));
+  `pnpm tauri dev` (desktop) is unaffected; `cargo test -p reflect-open` and
+  the TS suites stay green.
 - Fresh install → Start fresh → today's note exists on disk under
   `Documents/`, visible in the Files app; capture appends markdown that
   desktop later pulls intact.
@@ -388,9 +407,9 @@ Steps 1 and 2 are the existential gates; nothing else starts until both pass.
 - The keyboard never permanently occludes the editor or capture input, and
   the caret stays visible above the keyboard while typing (notched device,
   portrait + landscape).
-- A conflicted note opens protected with its "Needs review" state and never
-  blocks sync of other notes; a lossy-round-trip note opens protected, same
-  as desktop.
+- A conflicted note opens protected with its "Needs review" state, offers
+  mine/theirs/both resolution actions, and never blocks sync of other notes; a
+  lossy-round-trip note opens protected, same as desktop.
 - No `private: true` content leaves the device: mobile v1 makes **no** AI or
   transcription calls at all; network egress is GitHub (sync) only.
 - A TestFlight build installs and survives backgrounding/resume without a

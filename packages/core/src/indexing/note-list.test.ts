@@ -16,20 +16,24 @@ afterEach(() => {
 })
 
 describe('listNotes', () => {
-  it('lists non-daily notes newest first with stored previews and grouped tags', async () => {
+  it('lists non-daily notes pinned-first then newest with stored previews and grouped tags', async () => {
     mockInvoke
       .mockResolvedValueOnce([
+        {
+          path: 'notes/pinned.md',
+          title: 'Pinned Plan',
+          mtime: 500,
+          preview: 'Always on top.',
+          is_pinned: 1,
+          pinned_order: 1,
+        },
         {
           path: 'notes/health.md',
           title: 'Health Stacked',
           mtime: 2000,
           preview: 'Shop your health goals.',
-        },
-        {
-          path: 'notes/tokyo.md',
-          title: 'Tokyo Gâteau',
-          mtime: 1000,
-          preview: '',
+          is_pinned: 0,
+          pinned_order: null,
         },
       ])
       .mockResolvedValueOnce([
@@ -41,18 +45,20 @@ describe('listNotes', () => {
 
     expect(entries).toEqual([
       {
+        path: 'notes/pinned.md',
+        title: 'Pinned Plan',
+        mtime: 500,
+        snippet: 'Always on top.',
+        tags: [],
+        isPinned: true,
+      },
+      {
         path: 'notes/health.md',
         title: 'Health Stacked',
         mtime: 2000,
         snippet: 'Shop your health goals.',
         tags: ['health', 'link'],
-      },
-      {
-        path: 'notes/tokyo.md',
-        title: 'Tokyo Gâteau',
-        mtime: 1000,
-        snippet: '',
-        tags: [],
+        isPinned: false,
       },
     ])
 
@@ -63,8 +69,16 @@ describe('listNotes', () => {
     // per-query derivation.
     expect(sql).toContain('"preview"')
     expect(sql).not.toContain('note_text')
-    expect(sql).toContain('"daily_date" is null')
-    expect(sql).toContain('order by "notes"."mtime" desc')
+    // `kind = 'note'` excludes dailies (the stream is their home) and templates.
+    expect(sql).toContain('"notes"."kind" = ?')
+    // Pinned notes lead (explicit order first), then recency — V1's list
+    // order, via the recallOrder helper shared with filtered-search.
+    const pinnedAt = sql.indexOf('"notes"."is_pinned" desc')
+    const orderAt = sql.indexOf('"notes"."pinned_order" is null')
+    const mtimeAt = sql.indexOf('"notes"."mtime" desc')
+    expect(pinnedAt).toBeGreaterThan(-1)
+    expect(orderAt).toBeGreaterThan(pinnedAt)
+    expect(mtimeAt).toBeGreaterThan(orderAt)
     expect(sql).not.toContain('exists')
     // Uncapped: the screen virtualizes instead.
     expect(sql).not.toContain('limit')
@@ -75,15 +89,22 @@ describe('listNotes', () => {
     const [, tagArgs] = mockInvoke.mock.calls[1]!
     const tagSql = String(tagArgs['sql'])
     expect(tagSql).toContain('inner join "notes"')
-    expect(tagSql).toContain('"daily_date" is null')
+    expect(tagSql).toContain('"notes"."kind" = ?')
     expect(tagSql).not.toContain(' in (')
-    expect(tagArgs['params']).toEqual([])
+    expect(tagArgs['params']).toEqual(['note'])
   })
 
   it('narrows both queries to one tag via tag-first joins on the stored folded tag_key', async () => {
     mockInvoke
       .mockResolvedValueOnce([
-        { path: 'notes/health.md', title: 'Health Stacked', mtime: 2000, preview: '' },
+        {
+          path: 'notes/health.md',
+          title: 'Health Stacked',
+          mtime: 2000,
+          preview: '',
+          is_pinned: 0,
+          pinned_order: null,
+        },
       ])
       .mockResolvedValueOnce([])
 
@@ -97,7 +118,7 @@ describe('listNotes', () => {
     expect(listSql).toContain('"tags"."tag_key"')
     expect(listSql).not.toContain('exists')
     expect(listSql).not.toContain('lower(')
-    expect(listArgs['params']).toEqual(['book'])
+    expect(listArgs['params']).toEqual(['book', 'note'])
 
     const [, tagArgs] = mockInvoke.mock.calls[1]!
     const tagSql = String(tagArgs['sql'])
@@ -105,7 +126,7 @@ describe('listNotes', () => {
     expect(tagSql).toContain('"filter_tags"."tag_key"')
     expect(tagSql).not.toContain('exists')
     expect(tagSql).not.toContain('lower(')
-    expect(tagArgs['params']).toEqual(['book'])
+    expect(tagArgs['params']).toEqual(['book', 'note'])
   })
 
   it('skips the tag fetch entirely when no notes match', async () => {
@@ -141,11 +162,11 @@ describe('listRecentNotes', () => {
     const [command, args] = mockInvoke.mock.calls[0]!
     expect(command).toBe('db_query')
     const sql = String(args['sql'])
-    expect(sql).toContain('"daily_date" is null')
+    expect(sql).toContain('"notes"."kind" = ?')
     expect(sql).toContain('"is_private"')
     expect(sql).toContain('order by "notes"."mtime" desc')
     expect(sql).toContain('limit')
-    expect(args['params']).toEqual([0, 5])
+    expect(args['params']).toEqual(['note', 0, 5])
   })
 
   it('narrows to one tag via the stored folded tag_key', async () => {
@@ -160,7 +181,7 @@ describe('listRecentNotes', () => {
     expect(sql).toContain('"tags"."tag_key"')
     expect(sql).not.toContain('exists')
     expect(sql).not.toContain('lower(')
-    expect(args['params']).toEqual(['book', 0, 5])
+    expect(args['params']).toEqual(['book', 'note', 0, 5])
   })
 })
 
@@ -180,7 +201,7 @@ describe('listNoteTags', () => {
     const [command, args] = mockInvoke.mock.calls[0]!
     expect(command).toBe('db_query')
     const sql = String(args['sql'])
-    expect(sql).toContain('"daily_date" is null')
+    expect(sql).toContain('"notes"."kind" = ?')
     expect(sql).toContain('group by "tags"."tag_key"')
   })
 })

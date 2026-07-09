@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { gistBodyHash, parseNote } from '../markdown'
-import { buildIndexedNote, indexedNoteSchema } from './indexed-note'
+import { buildIndexedNote, indexedNoteSchema, PROJECTION_VERSION } from './indexed-note'
 
 describe('buildIndexedNote', () => {
+  it('carries the projection version that backfills the derived subject-alias rows', () => {
+    expect(PROJECTION_VERSION).toBe(14)
+  })
+
   it('flattens a parsed note into the index payload', () => {
     const source =
       '---\nid: 01H\naliases: [PJX, "Proj X"]\nprivate: true\npinned: true\n---\n' +
@@ -40,6 +44,56 @@ describe('buildIndexedNote', () => {
       true,
     )
     expect(indexed.assets).toEqual(['assets/p.png'])
+  })
+
+  it('derives v1 subject aliases from a `//` title, after frontmatter aliases', () => {
+    const source = '---\naliases: [Mummy]\n---\n# Charlotte MacCaw // Mum\n\nHi.'
+    const indexed = buildIndexedNote(parseNote({ path: 'notes/charlotte.md', source }), {
+      fileHash: 'h',
+      mtime: 0,
+      source,
+    })
+    expect(indexed.title).toBe('Charlotte MacCaw // Mum')
+    expect(indexed.titleKey).toBe('charlotte maccaw // mum')
+    expect(indexed.aliases).toEqual([
+      { alias: 'Mummy', aliasKey: 'mummy' },
+      { alias: 'Charlotte MacCaw', aliasKey: 'charlotte maccaw' },
+      { alias: 'Mum', aliasKey: 'mum' },
+    ])
+  })
+
+  it('skips derived subject aliases a frontmatter alias already claims', () => {
+    const source = '---\naliases: [MUM]\n---\n# Charlotte MacCaw // Mum\n\nHi.'
+    const indexed = buildIndexedNote(parseNote({ path: 'notes/charlotte.md', source }), {
+      fileHash: 'h',
+      mtime: 0,
+      source,
+    })
+    expect(indexed.aliases).toEqual([
+      { alias: 'MUM', aliasKey: 'mum' },
+      { alias: 'Charlotte MacCaw', aliasKey: 'charlotte maccaw' },
+    ])
+  })
+
+  it('projects Email field bullets with folded keys, ignoring prose mentions', () => {
+    const source =
+      '# Ada Lovelace\n\n- Type: #person\n- Email: Ada@Example.com\n\nIntro via bob@corp.example.'
+    const indexed = buildIndexedNote(parseNote({ path: 'notes/ada.md', source }), {
+      fileHash: 'h',
+      mtime: 0,
+      source,
+    })
+    expect(indexed.emails).toEqual([{ email: 'Ada@Example.com', emailKey: 'ada@example.com' }])
+  })
+
+  it('reads email fields from the body with frontmatter split off', () => {
+    const source = '---\nid: 01H\n---\n# Ada\n\n- Email: ada@example.com'
+    const indexed = buildIndexedNote(parseNote({ path: 'notes/ada.md', source }), {
+      fileHash: 'h',
+      mtime: 0,
+      source,
+    })
+    expect(indexed.emails).toEqual([{ email: 'ada@example.com', emailKey: 'ada@example.com' }])
   })
 
   it('derives the list preview and folded tag keys at index time', () => {
@@ -85,6 +139,18 @@ describe('buildIndexedNote', () => {
     expect(indexed.id).toBeNull()
     expect(indexed.isPrivate).toBe(false)
     expect(indexed.isPinned).toBe(false)
+  })
+
+  it('derives the note kind from the path', () => {
+    const kindOf = (path: string): string =>
+      buildIndexedNote(parseNote({ path, source: 'body' }), {
+        fileHash: 'h',
+        mtime: 0,
+        source: 'body',
+      }).kind
+    expect(kindOf('daily/2026-06-09.md')).toBe('daily')
+    expect(kindOf('notes/n.md')).toBe('note')
+    expect(kindOf('templates/journal.md')).toBe('template')
   })
 
   it('projects an explicit pin order', () => {
@@ -144,8 +210,9 @@ describe('buildIndexedNote', () => {
     expect(indexed.gistStale).toBe(false)
   })
 
-  it('maps GFM checkboxes into task rows', () => {
-    const source = '# Todo\n\n- [ ] buy milk\n- [x] call mum\n'
+  it('maps only round task checkboxes into task rows', () => {
+    const source =
+      '# Todo\n\n+ [ ] buy milk\n- [ ] checklist\n* [x] checklist\n1. [ ] ordered\n+ [x] call mum\n'
     const indexed = buildIndexedNote(parseNote({ path: 'notes/n.md', source }), {
       fileHash: 'h',
       mtime: 0,
@@ -153,12 +220,12 @@ describe('buildIndexedNote', () => {
     })
     expect(indexed.tasks).toEqual([
       { markerOffset: source.indexOf('[ ]'), text: 'buy milk', raw: '[ ] buy milk', checked: false, dueDate: null },
-      { markerOffset: source.indexOf('[x]'), text: 'call mum', raw: '[x] call mum', checked: true, dueDate: null },
+      { markerOffset: source.indexOf('[x] call'), text: 'call mum', raw: '[x] call mum', checked: true, dueDate: null },
     ])
   })
 
   it('maps an explicit task due date from a [[YYYY-MM-DD]] link', () => {
-    const source = '# Todo\n\n- [ ] pay bill [[2026-06-20]]\n'
+    const source = '# Todo\n\n+ [ ] pay bill [[2026-06-20]]\n'
     const indexed = buildIndexedNote(parseNote({ path: 'notes/n.md', source }), {
       fileHash: 'h',
       mtime: 0,

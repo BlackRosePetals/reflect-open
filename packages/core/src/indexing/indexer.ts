@@ -6,15 +6,20 @@ import {
   applyIndexedNotes,
   clearIndex,
   moveIndexedRows,
+  reconcileScan,
   removeFromIndex,
   setIndexMeta,
+  touchIndexedNotes,
+  type IndexedNoteTouch,
 } from './commands'
 import { assetReferencingNotePaths } from './asset-refs'
 import { gatherAssetDescriptionText } from './asset-description-text'
+import { emitIndexApplied } from './index-applied'
 import { hashContent } from './hash'
 import { buildIndexedNote, PROJECTION_VERSION, type IndexedNote } from './indexed-note'
 import { detectExternalMoves } from './move-healing'
-import { getIndexedHashes, getIndexMeta } from './queries'
+import { INDEX_PASS_YIELD_EVERY, yieldToEventLoop } from './pacing'
+import { getIndexMeta } from './queries'
 
 /**
  * The indexing pipeline (Plan 04): read (Plan 02) → parse/extract in TS
@@ -29,11 +34,12 @@ import { getIndexedHashes, getIndexMeta } from './queries'
  */
 
 /**
- * Notes per `index_apply_batch` transaction during a full rebuild. Bounds the
- * IPC payload and transaction size on large graphs while keeping the
- * transaction/round-trip count far below one-per-note.
+ * Notes per `index_apply_batch` transaction in the bulk passes (rebuild,
+ * reconcile, and large watcher batches). Bounds the IPC payload and
+ * transaction size on large graphs while keeping the transaction/round-trip
+ * count far below one-per-note.
  */
-const REBUILD_BATCH_SIZE = 256
+export const INDEX_APPLY_BATCH_SIZE = 256
 
 /**
  * The `index_meta` key holding the {@link PROJECTION_VERSION} the stored rows
@@ -54,18 +60,34 @@ export async function indexNote(
   options: { generation: number; content?: string | undefined; mtime?: number | undefined },
 ): Promise<void> {
   const content = options.content ?? (await readNote(path))
-  const parsed = parseNote({ path, source: content })
   const fileHash = await hashContent(content)
+  const note = await buildNoteProjection(path, content, {
+    fileHash,
+    mtime: options.mtime ?? Date.now(),
+  })
+  await applyIndexedNote(note, options.generation)
+}
+
+/**
+ * Parse `content` and flatten it into the note's index projection — the one
+ * home of the parse → asset-description-gather → build step that every
+ * indexing path (single note, rebuild, reconcile, watcher batch) shares.
+ * Callers hash first: the hash gates whether this (comparatively expensive)
+ * step runs at all.
+ */
+export async function buildNoteProjection(
+  path: string,
+  content: string,
+  facts: { fileHash: string; mtime: number },
+): Promise<IndexedNote> {
+  const parsed = parseNote({ path, source: content })
   const assetText = await gatherAssetDescriptionText(parsed.assets.map((asset) => asset.path))
-  await applyIndexedNote(
-    buildIndexedNote(parsed, {
-      fileHash,
-      mtime: options.mtime ?? Date.now(),
-      source: content,
-      assetText,
-    }),
-    options.generation,
-  )
+  return buildIndexedNote(parsed, {
+    fileHash: facts.fileHash,
+    mtime: facts.mtime,
+    source: content,
+    assetText,
+  })
 }
 
 /**
@@ -75,6 +97,13 @@ export async function indexNote(
  * this folds the new description text into their FTS documents. `indexNote` is
  * not hash-gated, so the unchanged note files re-index unconditionally. A note
  * removed since it referenced the asset is skipped. Pinned to `generation`.
+ *
+ * The re-applied notes broadcast through {@link emitIndexApplied} — the same
+ * post-apply signal the live indexer emits — because these writes bypass the
+ * watcher pipeline entirely (`.reflect.md` files are untracked by design).
+ * Without it, subscribers that follow the index (the embedding sync above
+ * all, which must re-embed the notes so the new description text reaches the
+ * semantic leg too) would never hear about description-driven changes.
  */
 export async function reindexNotesReferencing(
   assetPaths: readonly string[],
@@ -86,14 +115,28 @@ export async function reindexNotesReferencing(
       notePaths.add(notePath)
     }
   }
-  for (const notePath of notePaths) {
-    try {
-      await indexNote(notePath, { generation })
-    } catch (cause) {
-      if (isAppError(cause) && cause.kind === 'notFound') {
-        continue // the note was removed since it referenced the asset
+  const applied: string[] = []
+  try {
+    for (const notePath of notePaths) {
+      try {
+        await indexNote(notePath, { generation })
+        applied.push(notePath)
+      } catch (cause) {
+        if (isAppError(cause) && cause.kind === 'notFound') {
+          continue // the note was removed since it referenced the asset
+        }
+        throw cause
       }
-      throw cause
+    }
+  } finally {
+    // Emit even when a later note's re-index threw: whatever was applied is
+    // real, and unnotified followers would serve stale vectors until the
+    // next backfill.
+    if (applied.length > 0) {
+      emitIndexApplied(
+        applied.map((path) => ({ path, kind: 'upsert' as const })),
+        generation,
+      )
     }
   }
 }
@@ -118,6 +161,18 @@ export interface IndexPassOptions {
    * — without it, history entries keep pointing at the dead path.
    */
   onMoved?: (from: string, to: string) => void
+  /**
+   * Called as the pass advances through the file listing — at every pacing
+   * break and once at the end — so a first index over thousands of notes can
+   * show real progress instead of a frozen shell. `done` counts every listed
+   * file the pass has moved past (skipped or indexed); `total` is the listing
+   * size; `worked` counts the files actually *read* so far (not skipped
+   * read-free by the mtime layer). `worked` is what distinguishes a genuine
+   * first index from a routine repeat pass that skips everything — the
+   * progress UI must gate on it, or a healthy sub-second pass flashes a
+   * "preparing" surface on every open.
+   */
+  onFileProgress?: (done: number, total: number, worked: number) => void
 }
 
 /** One note omitted from a rebuild because its projection could not be written. */
@@ -128,28 +183,119 @@ export interface SkippedIndexedNote {
   message: string
 }
 
-async function applyRebuildBatch(
+/**
+ * Apply `notes` in one transaction, splitting a refused batch in half until
+ * the failing note stands alone — one bad projection must not cost the rest
+ * of the batch. The lone failure reports through `onSkippedNote`, or throws
+ * without one. Returns how many notes were actually written.
+ */
+async function applySplitBatch(
   notes: IndexedNote[],
   generation: number,
   onSkippedNote?: (note: SkippedIndexedNote) => void,
-): Promise<void> {
+): Promise<number> {
   if (notes.length === 0) {
-    return
+    return 0
   }
   try {
     await applyIndexedNotes(notes, generation)
-    return
+    return notes.length
   } catch (cause) {
     if (notes.length === 1) {
       if (onSkippedNote === undefined) {
         throw cause
       }
       onSkippedNote({ path: notes[0]!.path, message: errorMessage(cause) })
-      return
+      return 0
     }
     const midpoint = Math.ceil(notes.length / 2)
-    await applyRebuildBatch(notes.slice(0, midpoint), generation, onSkippedNote)
-    await applyRebuildBatch(notes.slice(midpoint), generation, onSkippedNote)
+    const first = await applySplitBatch(notes.slice(0, midpoint), generation, onSkippedNote)
+    return first + (await applySplitBatch(notes.slice(midpoint), generation, onSkippedNote))
+  }
+}
+
+/** A shared accumulator for bulk index writes — see {@link createIndexApplyBatch}. */
+export interface IndexApplyBatch {
+  /** Queue a projection; flushes automatically at the transaction cap. */
+  add: (note: IndexedNote) => Promise<void>
+  /** Apply everything still queued. Safe to call repeatedly. */
+  flush: () => Promise<void>
+  /** Projections actually written so far (skipped notes excluded). */
+  applied: () => number
+}
+
+/**
+ * The one write path for the bulk index passes (rebuild, reconcile, watcher
+ * batches): accumulate projections, apply them in shared
+ * `index_apply_batch` transactions of {@link INDEX_APPLY_BATCH_SIZE}, and
+ * degrade refused batches through {@link applySplitBatch}'s halving retry so
+ * failures attribute to single notes. Callers own *when* to flush early —
+ * e.g. before a remove that must not be overtaken by queued upserts.
+ */
+export function createIndexApplyBatch(
+  generation: number,
+  onSkippedNote?: (note: SkippedIndexedNote) => void,
+): IndexApplyBatch {
+  let batch: IndexedNote[] = []
+  let appliedCount = 0
+  async function flush(): Promise<void> {
+    if (batch.length === 0) {
+      return
+    }
+    const notes = batch
+    batch = []
+    appliedCount += await applySplitBatch(notes, generation, onSkippedNote)
+  }
+  return {
+    add: async (note) => {
+      batch.push(note)
+      if (batch.length >= INDEX_APPLY_BATCH_SIZE) {
+        await flush()
+      }
+    },
+    flush,
+    applied: () => appliedCount,
+  }
+}
+
+/** A shared accumulator for mtime re-stamps — see {@link createMtimeTouchBatch}. */
+export interface MtimeTouchBatch {
+  /** Queue a re-stamp; flushes automatically at the transaction cap. */
+  add: (entry: IndexedNoteTouch) => Promise<void>
+  /** Apply everything still queued. Safe to call repeatedly. */
+  flush: () => Promise<void>
+  /** Re-stamps actually written so far. */
+  applied: () => number
+}
+
+/**
+ * Accumulate mtime re-stamps for hash-match skips (the self-heal for rows
+ * whose stored mtime was an echo-time stamp — see {@link touchIndexedNotes})
+ * and apply them in shared `index_touch` transactions of
+ * {@link INDEX_APPLY_BATCH_SIZE}. Both bulk skip paths (reconcile, watcher
+ * batch) share this shape, mirroring {@link createIndexApplyBatch}.
+ */
+export function createMtimeTouchBatch(generation: number): MtimeTouchBatch {
+  let batch: IndexedNoteTouch[] = []
+  let appliedCount = 0
+  async function flush(): Promise<void> {
+    if (batch.length === 0) {
+      return
+    }
+    const entries = batch
+    batch = []
+    await touchIndexedNotes(entries, generation)
+    appliedCount += entries.length
+  }
+  return {
+    add: async (entry) => {
+      batch.push(entry)
+      if (batch.length >= INDEX_APPLY_BATCH_SIZE) {
+        await flush()
+      }
+    },
+    flush,
+    applied: () => appliedCount,
   }
 }
 
@@ -161,25 +307,31 @@ async function applyRebuildBatch(
  * empty or half-populated.
  */
 export async function rebuildIndex(options: IndexPassOptions): Promise<void> {
-  const { generation, onSkippedNote } = options
+  const { generation, onSkippedNote, onFileProgress } = options
   if (options.signal?.aborted) {
     return // don't wipe the current index for an already-cancelled pass
   }
   await clearIndex(generation)
   const files = await listFiles()
-  let batch: IndexedNote[] = []
+  const batch = createIndexApplyBatch(generation, onSkippedNote)
+  let done = 0
+  let worked = 0
   for (const file of files) {
-    const content = await readNote(file.path)
-    const parsed = parseNote({ path: file.path, source: content })
-    const fileHash = await hashContent(content)
-    const assetText = await gatherAssetDescriptionText(parsed.assets.map((asset) => asset.path))
-    batch.push(buildIndexedNote(parsed, { fileHash, mtime: file.modifiedMs, source: content, assetText }))
-    if (batch.length >= REBUILD_BATCH_SIZE) {
-      await applyRebuildBatch(batch, generation, onSkippedNote)
-      batch = []
+    done += 1
+    if (done % INDEX_PASS_YIELD_EVERY === 0) {
+      onFileProgress?.(done, files.length, worked)
+      await yieldToEventLoop()
     }
+    if (file.placeholder === true) {
+      continue // evicted to iCloud — unreadable until re-download, indexed then
+    }
+    worked += 1
+    const content = await readNote(file.path)
+    const fileHash = await hashContent(content)
+    await batch.add(await buildNoteProjection(file.path, content, { fileHash, mtime: file.modifiedMs }))
   }
-  await applyRebuildBatch(batch, generation, onSkippedNote)
+  await batch.flush()
+  onFileProgress?.(files.length, files.length, worked)
   // The rows now match the current projection — stamp it so `syncIndex` can
   // reconcile cheaply from here on. A superseded pass stamps into a stale
   // generation, which Rust drops: the next open then rebuilds again, which is
@@ -200,6 +352,13 @@ export async function syncIndex(options: IndexPassOptions): Promise<void> {
   if (stamped === String(PROJECTION_VERSION)) {
     return reconcileIndex(options)
   }
+  // Loud on purpose: a rebuild is expected once per projection bump or fresh
+  // graph. Seeing this on *every* open means the stamp (or the whole index
+  // file) isn't persisting between launches — a pathology that would
+  // otherwise be indistinguishable from a slow reconcile.
+  console.warn(
+    `index: stored projection version ${stamped === null ? 'none' : `"${stamped}"`} ≠ ${PROJECTION_VERSION} — full rebuild`,
+  )
   return rebuildIndex(options)
 }
 
@@ -209,30 +368,49 @@ export async function syncIndex(options: IndexPassOptions): Promise<void> {
  * rebuild on an already-populated index, and abortable on graph switch. Writes
  * carry `generation`, so even a pass that races a connection swap can't corrupt
  * the newly-opened index — Rust drops its stale writes.
+ *
+ * The full-listing comparison lives in Rust ({@link reconcileScan}): one IPC
+ * round-trip returns only the files needing a read — mtime moved, mtime too
+ * fresh to trust, or no row yet — with their stored facts riding along, plus
+ * the rows whose files vanished. On a healthy graph the delta is empty and
+ * the whole pass is that single call. Hashes stay the authority for "did
+ * content change": a read whose hash matches skips the write, re-stamping the
+ * row's mtime when it disagreed with the listing (an echo-time stamp, or a
+ * provider rewrote it) so the mismatch can't cost a re-read on every future
+ * pass. Changed notes apply in shared `index_apply_batch` transactions.
  */
 export async function reconcileIndex(options: IndexPassOptions): Promise<void> {
-  const { generation, signal, onMoved } = options
-  const files = await listFiles()
+  const { generation, signal, onMoved, onSkippedNote, onFileProgress } = options
+  const scan = await reconcileScan(generation)
   if (signal?.aborted) {
     return
   }
-  const onDisk = new Set(files.map((file) => file.path))
-  const stored = await getIndexedHashes()
+  /** Stored facts per candidate path; healed moves graft the orphan's in. */
+  const facts = new Map<string, { mtime: number; fileHash: string }>()
+  for (const candidate of scan.candidates) {
+    if (candidate.storedMtime !== null && candidate.storedHash !== null) {
+      facts.set(candidate.path, { mtime: candidate.storedMtime, fileHash: candidate.storedHash })
+    }
+  }
+  /** Rows to drop at the end: scan orphans, minus heals, plus TOCTOU ghosts. */
+  const removals = new Map(scan.orphans.map((orphan) => [orphan.path, orphan]))
 
   // Id-based move healing (Plan 17): a row whose file vanished plus a new
   // file carrying the same frontmatter id is a rename observed after the
   // fact — an external tool or a sync pull moved it while Reflect wasn't
   // looking. Move the rows instead of delete+create, so embedding vectors
   // survive. Best-effort throughout: any failure degrades to the plain pass
-  // below (the arrival is indexed fresh, the cleanup loop drops the orphan).
-  const orphanPaths = [...stored.keys()].filter((path) => !onDisk.has(path))
-  const arrivalPaths = files.filter((file) => !stored.has(file.path)).map((file) => file.path)
+  // below (the arrival is indexed fresh, the removal loop drops the orphan).
+  // Placeholders can't be arrivals: Rust never lists them as candidates.
+  const arrivalPaths = scan.candidates
+    .filter((candidate) => candidate.storedHash === null)
+    .map((candidate) => candidate.path)
   /** Arrival content read for pairing — the main pass below reuses it. */
   let arrivalContent = new Map<string, string>()
   try {
-    const scan = await detectExternalMoves(orphanPaths, arrivalPaths, { signal })
-    arrivalContent = scan.content
-    for (const move of scan.moves) {
+    const healScan = await detectExternalMoves([...removals.keys()], arrivalPaths, { signal })
+    arrivalContent = healScan.content
+    for (const move of healScan.moves) {
       if (signal?.aborted) {
         return
       }
@@ -244,12 +422,12 @@ export async function reconcileIndex(options: IndexPassOptions): Promise<void> {
         console.error(`id-based move failed (${move.from} → ${move.to}):`, err)
         continue
       }
-      // The moved row carries the old path's hash: the main pass re-indexes
+      // The moved row carries the old path's facts: the main pass re-indexes
       // at the new path only if the content actually changed in transit.
-      const hash = stored.get(move.from)
-      stored.delete(move.from)
-      if (hash !== undefined) {
-        stored.set(move.to, hash)
+      const orphan = removals.get(move.from)
+      removals.delete(move.from)
+      if (orphan !== undefined) {
+        facts.set(move.to, { mtime: orphan.storedMtime, fileHash: orphan.storedHash })
       }
       onMoved?.(move.from, move.to)
     }
@@ -261,45 +439,65 @@ export async function reconcileIndex(options: IndexPassOptions): Promise<void> {
     return
   }
 
-  for (const file of files) {
+  const batch = createIndexApplyBatch(generation, onSkippedNote)
+  const touches = createMtimeTouchBatch(generation)
+  const total = scan.candidates.length
+  let done = 0
+  let worked = 0
+  for (const candidate of scan.candidates) {
     if (signal?.aborted) {
       return
     }
-    let content = arrivalContent.get(file.path)
+    done += 1
+    if (done % INDEX_PASS_YIELD_EVERY === 0) {
+      onFileProgress?.(done, total, worked)
+      await yieldToEventLoop()
+    }
+    const stored = facts.get(candidate.path)
+    worked += 1
+    let content = arrivalContent.get(candidate.path)
     if (content === undefined) {
       try {
-        content = await readNote(file.path)
+        content = await readNote(candidate.path)
       } catch (err) {
-        // The file moved/was deleted/locked between listFiles() and here (TOCTOU).
-        // If it's gone, drop it from `onDisk` so the cleanup loop removes its
-        // now-ghost row this pass; for a transient error keep the row and retry.
-        if (isAppError(err) && err.kind === 'notFound') {
-          onDisk.delete(file.path)
+        // The file moved/was deleted/locked between the scan and here (TOCTOU).
+        // If it's gone and had a row, that row is now a ghost — remove it this
+        // pass; for a transient error keep the row and retry next pass.
+        if (isAppError(err) && err.kind === 'notFound' && stored !== undefined) {
+          removals.set(candidate.path, {
+            path: candidate.path,
+            storedMtime: stored.mtime,
+            storedHash: stored.fileHash,
+          })
         }
         continue
       }
     }
     const fileHash = await hashContent(content)
-    if (stored.get(file.path) === fileHash) {
+    if (stored?.fileHash === fileHash) {
+      // Content unchanged. If the stored mtime doesn't match the listing (an
+      // echo-time stamp, or a provider rewrote it), re-stamp it so the next
+      // pass takes the read-free path — left alone it mismatches forever.
+      if (stored.mtime !== candidate.modifiedMs) {
+        await touches.add({ path: candidate.path, mtime: candidate.modifiedMs })
+      }
       continue // unchanged
     }
     if (signal?.aborted) {
       return // re-check after the awaits — don't write for a superseded pass
     }
-    const parsed = parseNote({ path: file.path, source: content })
-    const assetText = await gatherAssetDescriptionText(parsed.assets.map((asset) => asset.path))
-    await applyIndexedNote(
-      buildIndexedNote(parsed, { fileHash, mtime: file.modifiedMs, source: content, assetText }),
-      generation,
+    await batch.add(
+      await buildNoteProjection(candidate.path, content, { fileHash, mtime: candidate.modifiedMs }),
     )
   }
+  await batch.flush()
+  await touches.flush()
+  onFileProgress?.(total, total, worked)
 
-  for (const path of stored.keys()) {
+  for (const path of removals.keys()) {
     if (signal?.aborted) {
       return
     }
-    if (!onDisk.has(path)) {
-      await removeFromIndex(path, generation)
-    }
+    await removeFromIndex(path, generation)
   }
 }

@@ -2,9 +2,10 @@ import { errorMessage, isAppError, toAppError, type AppError } from '../errors'
 import {
   pickTranscriptionConfig,
   type AiProvidersState,
-  type TranscriptionProvider,
+  type TranscriptionConfig,
 } from '../ai/provider-config'
 import { aiKeySecretName } from '../ai/secrets'
+import { generateAudioMemoTitle, pickAudioMemoTitleConfig } from '../ai/audio-memo-title'
 import {
   AUDIO_EXTENSION_BY_MIME,
   base64ToBytes,
@@ -15,25 +16,26 @@ import {
 } from '../ai/transcribe'
 import { listDir, listFiles, readAsset, readNote, writeAsset, writeNote } from '../graph/commands'
 import { AUDIO_MEMOS_DIR, audioMemoPath, dailyPath, notePath } from '../graph/paths'
-import { appendUnderHeading } from '../markdown/edit'
+import { appendUnderHeading, wikiLinkSafe } from '../markdown/edit'
 import { getSecret } from '../secrets/keychain'
+import type { AiProviderConfig } from '../settings/schema'
 
 /**
  * Capture actions for audio memos (the first of the `actions/` capture
  * family — Plan 11's link capture will sit alongside). The pipeline is
- * raw-first, like the capture-inbox spool (see
- * `docs/spikes/link-capture-bridge.md`): the recording itself is the durable
- * artifact, transcription is async enrichment that can fail and retry freely.
+ * raw-first, like the capture-inbox spool: the recording itself is the durable
+ * artifact, and transcription is async enrichment that can fail and retry freely.
  *
  * 1. **Capture** ({@link captureAudioMemo}): the recording is written to
  *    `audio-memos/audio-memo-<date>-<time>.<ext>` — local, instant, no
  *    network. The sync engine commits it like any other change.
  * 2. **Reconcile** ({@link reconcileAudioMemos}): a memo's transcription is a
  *    note with the **same basename** (`notes/<base>.md`). Any memo without
- *    one is transcribed (BYOK provider), its transcription note written, and
- *    a backlink appended to its day's daily note — note first, because it
- *    carries the transcript: a failure between the two writes leaves an
- *    unlinked note, never a tombstoned memo whose transcript was dropped. A
+ *    one is transcribed (BYOK provider), named from that transcript, its
+ *    transcription note written, and a backlink appended to its day's daily
+ *    note — note first, because it carries the transcript: a failure between
+ *    the two writes leaves an unlinked note, never a tombstoned memo whose
+ *    transcript was dropped. A
  *    failed pass (offline, bad key) leaves the memo pending; the next
  *    trigger retries. Nothing is ever lost to a network error. A recording
  *    the provider *refuses* (oversized, unsupported container) is tombstoned
@@ -64,9 +66,9 @@ export interface AudioMemoIdentity {
   base: string
   /** Local ISO day it was recorded — the daily note that backlinks it. */
   date: string
-  /** The transcription note's title (its H1). Not unique within a second. */
+  /** The timestamp fallback title, before the transcript-derived name exists. */
   title: string
-  /** Short display alias for the daily-note link, e.g. `Audio memo 15:30`. */
+  /** Timestamp fallback alias for the daily-note link, e.g. `Audio memo 15:30`. */
   alias: string
   /** Graph-relative path of the recording under `audio-memos/`. */
   audioPath: string
@@ -223,6 +225,10 @@ export async function listPendingAudioMemos(generation: number): Promise<AudioMe
   ])
   const existingNotes = new Set(notes.map((file) => file.path))
   const candidates = recordings
+    // An iCloud-evicted recording lists under its logical name but its bytes
+    // aren't local — reading it would abort the pass. It transcribes on a
+    // later pass, once downloaded (Plan 21).
+    .filter((file) => file.placeholder !== true)
     .map((file) => audioMemoFromPath(file.path))
     .filter((memo): memo is AudioMemoIdentity => memo !== null)
     .filter((memo) => !existingNotes.has(memo.notePath))
@@ -241,8 +247,8 @@ export async function listPendingAudioMemos(generation: number): Promise<AudioMe
  * (`[[<base>|…]]`) resolves through the index — and keeps resolving if the
  * user renames the title.
  */
-function transcriptionNote(memo: AudioMemoIdentity, body: string): string {
-  return `---\naliases: [${memo.base}]\n---\n\n# ${memo.title}\n\n[Recording](${memo.audioPath})\n\n${body}\n`
+function transcriptionNote(memo: AudioMemoIdentity, title: string, body: string): string {
+  return `---\naliases: [${memo.base}]\n---\n\n# ${title}\n\n[Recording](${memo.audioPath})\n\n${body}\n`
 }
 
 /**
@@ -254,24 +260,45 @@ function transcriptionNote(memo: AudioMemoIdentity, body: string): string {
 async function memoNoteBody(input: {
   audio: Blob
   memo: AudioMemoIdentity
-  provider: TranscriptionProvider
+  config: TranscriptionConfig
   apiKey: string
+  titleCredentials: { config: AiProviderConfig; apiKey: string } | null
   fetchFn?: typeof fetch | undefined
-}): Promise<{ body: string; rejected: boolean }> {
+}): Promise<{ body: string; title: string; rejected: boolean }> {
   try {
     const text = await transcribeAudio({
-      provider: input.provider,
+      provider: input.config.provider,
       apiKey: input.apiKey,
       audio: input.audio,
       mimeType: input.memo.mimeType,
       fetchFn: input.fetchFn,
     })
-    return { body: text === '' ? 'No speech detected.' : text, rejected: false }
+    const title =
+      text === ''
+        ? input.memo.title
+        : await generateAudioMemoTitle({
+            ...(input.titleCredentials !== null
+              ? {
+                  credentials: {
+                    config: input.titleCredentials.config,
+                    apiKey: input.titleCredentials.apiKey,
+                  },
+                }
+              : {}),
+            fetchFn: input.fetchFn,
+            transcript: text,
+            fallbackTitle: input.memo.title,
+          })
+    return { body: text === '' ? 'No speech detected.' : text, title, rejected: false }
   } catch (cause) {
     if (!isTranscriptionRejected(cause)) {
       throw cause
     }
-    return { body: `Transcription failed: ${errorMessage(cause)}`, rejected: true }
+    return {
+      body: `Transcription failed: ${errorMessage(cause)}`,
+      title: input.memo.title,
+      rejected: true,
+    }
   }
 }
 
@@ -287,12 +314,17 @@ const MEMOS_HEADING = 'Audio memos'
  * reconciles it like any external change (clean buffers reload in place;
  * dirty ones park a conflict rather than being clobbered).
  */
-async function ensureDailyBacklink(memo: AudioMemoIdentity, generation: number): Promise<void> {
+async function ensureDailyBacklink(
+  memo: AudioMemoIdentity,
+  title: string,
+  generation: number,
+): Promise<void> {
   const source = await dailyNoteSource(memo.date, generation)
   if (hasBacklink(source, memo)) {
     return
   }
-  const link = `[[${memo.base}|${memo.alias}]]`
+  const displayTitle = wikiLinkSafe(title) || memo.title
+  const link = `- [[${memo.base}|${displayTitle}]]`
   await writeNote(dailyPath(memo.date), appendUnderHeading(source, MEMOS_HEADING, link), generation)
 }
 
@@ -395,6 +427,15 @@ export async function reconcileAudioMemos(
       },
     }
   }
+  const titleConfig = pickAudioMemoTitleConfig(input.providers)
+  const titleApiKey =
+    titleConfig === null
+      ? null
+      : titleConfig.id === config.id
+        ? apiKey
+        : await getSecret(aiKeySecretName(titleConfig.id)).catch(() => null)
+  const titleCredentials =
+    titleConfig !== null && titleApiKey !== null ? { config: titleConfig, apiKey: titleApiKey } : null
 
   let transcribed = 0
   let rejected = 0
@@ -424,15 +465,16 @@ export async function reconcileAudioMemos(
       const note = await memoNoteBody({
         audio,
         memo,
-        provider: config.provider,
+        config,
         apiKey,
+        titleCredentials,
         fetchFn: input.fetchFn,
       })
       if (stale()) {
         return stalled()
       }
-      await writeNote(memo.notePath, transcriptionNote(memo, note.body), input.generation)
-      await ensureDailyBacklink(memo, input.generation)
+      await writeNote(memo.notePath, transcriptionNote(memo, note.title, note.body), input.generation)
+      await ensureDailyBacklink(memo, note.title, input.generation)
       if (note.rejected) {
         rejected += 1
       } else {
@@ -449,4 +491,3 @@ export async function reconcileAudioMemos(
   }
   return { pending: pending.length, transcribed, rejected, stopped: null }
 }
-

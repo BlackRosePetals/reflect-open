@@ -11,16 +11,22 @@ describe('settingsSchema', () => {
       editorTextSize: 'small',
       semanticSearchEnabled: false,
       describeAssets: true,
+      contactsEnabled: false,
       mobileOnboarded: false,
+      mobileStorage: 'local',
+      mobileGraphName: '',
       theme: 'system',
       timeFormat: '12h',
       dateFormat: 'mdy',
       weekStartDay: 'monday',
       allNotesFilterTags: ['book', 'link', 'person'],
+      calendarEnabled: false,
+      calendarIds: [],
       graphColors: {},
       aiProviders: [],
       defaultAiProviderId: null,
       chatModelSelection: null,
+      aiPrompts: [],
     })
     expect(DEFAULT_SETTINGS.editorMarkdownSyntax).toBe('hide')
     expect(DEFAULT_SETTINGS.editorSpellCheck).toBe(true)
@@ -29,16 +35,21 @@ describe('settingsSchema', () => {
     expect(DEFAULT_SETTINGS.editorTextSize).toBe('small')
     expect(DEFAULT_SETTINGS.semanticSearchEnabled).toBe(false)
     expect(DEFAULT_SETTINGS.describeAssets).toBe(true)
+    expect(DEFAULT_SETTINGS.contactsEnabled).toBe(false)
     expect(DEFAULT_SETTINGS.mobileOnboarded).toBe(false)
+    expect(DEFAULT_SETTINGS.mobileStorage).toBe('local')
     expect(DEFAULT_SETTINGS.theme).toBe('system')
     expect(DEFAULT_SETTINGS.timeFormat).toBe('12h')
     expect(DEFAULT_SETTINGS.dateFormat).toBe('mdy')
     expect(DEFAULT_SETTINGS.weekStartDay).toBe('monday')
     expect(DEFAULT_SETTINGS.allNotesFilterTags).toEqual(['book', 'link', 'person'])
+    expect(DEFAULT_SETTINGS.calendarEnabled).toBe(false)
+    expect(DEFAULT_SETTINGS.calendarIds).toEqual([])
     expect(DEFAULT_SETTINGS.graphColors).toEqual({})
     expect(DEFAULT_SETTINGS.aiProviders).toEqual([])
     expect(DEFAULT_SETTINGS.defaultAiProviderId).toBeNull()
     expect(DEFAULT_SETTINGS.chatModelSelection).toBeNull()
+    expect(DEFAULT_SETTINGS.aiPrompts).toEqual([])
   })
 
   it('accepts valid values', () => {
@@ -63,6 +74,7 @@ describe('settingsSchema', () => {
     expect(settingsSchema.parse({ theme: 'system' }).theme).toBe('system')
     expect(settingsSchema.parse({ timeFormat: '24h' }).timeFormat).toBe('24h')
     expect(settingsSchema.parse({ timeFormat: '12h' }).timeFormat).toBe('12h')
+    expect(settingsSchema.parse({ dateFormat: 'iso' }).dateFormat).toBe('iso')
     expect(settingsSchema.parse({ dateFormat: 'dmy' }).dateFormat).toBe('dmy')
     expect(settingsSchema.parse({ dateFormat: 'mdy' }).dateFormat).toBe('mdy')
     expect(settingsSchema.parse({ weekStartDay: 'monday' }).weekStartDay).toBe('monday')
@@ -71,10 +83,21 @@ describe('settingsSchema', () => {
     expect(settingsSchema.parse({ semanticSearchEnabled: false }).semanticSearchEnabled).toBe(false)
     expect(settingsSchema.parse({ describeAssets: true }).describeAssets).toBe(true)
     expect(settingsSchema.parse({ describeAssets: false }).describeAssets).toBe(false)
+    expect(settingsSchema.parse({ contactsEnabled: true }).contactsEnabled).toBe(true)
+    expect(settingsSchema.parse({ contactsEnabled: false }).contactsEnabled).toBe(false)
     expect(
       settingsSchema.parse({ allNotesFilterTags: ['meeting'] }).allNotesFilterTags,
     ).toEqual(['meeting'])
     expect(settingsSchema.parse({ allNotesFilterTags: [] }).allNotesFilterTags).toEqual([])
+    expect(settingsSchema.parse({ calendarEnabled: true }).calendarEnabled).toBe(true)
+    expect(settingsSchema.parse({ calendarEnabled: false }).calendarEnabled).toBe(false)
+    expect(settingsSchema.parse({ calendarIds: ['cal-1', 'cal-2'] }).calendarIds).toEqual([
+      'cal-1',
+      'cal-2',
+    ])
+    expect(settingsSchema.parse({ calendarIds: [] }).calendarIds).toEqual([])
+    expect(settingsSchema.parse({ mobileStorage: 'icloud' }).mobileStorage).toBe('icloud')
+    expect(settingsSchema.parse({ mobileStorage: 'local' }).mobileStorage).toBe('local')
   })
 
   it('degrades an invalid value to its default instead of failing the load', () => {
@@ -104,6 +127,8 @@ describe('settingsSchema', () => {
     // back to the default rather than failing the whole settings load.
     expect(settingsSchema.parse({ describeAssets: 'yes' }).describeAssets).toBe(true)
     expect(settingsSchema.parse({ describeAssets: 0 }).describeAssets).toBe(true)
+    expect(settingsSchema.parse({ contactsEnabled: 'yes' }).contactsEnabled).toBe(false)
+    expect(settingsSchema.parse({ contactsEnabled: 1 }).contactsEnabled).toBe(false)
     expect(settingsSchema.parse({ allNotesFilterTags: 'book' }).allNotesFilterTags).toEqual([
       'book',
       'link',
@@ -114,6 +139,12 @@ describe('settingsSchema', () => {
       'link',
       'person',
     ])
+    expect(settingsSchema.parse({ calendarEnabled: 'yes' }).calendarEnabled).toBe(false)
+    expect(settingsSchema.parse({ calendarEnabled: 1 }).calendarEnabled).toBe(false)
+    expect(settingsSchema.parse({ calendarIds: 'cal-1' }).calendarIds).toEqual([])
+    expect(settingsSchema.parse({ calendarIds: [7] }).calendarIds).toEqual([])
+    expect(settingsSchema.parse({ mobileStorage: 'dropbox' }).mobileStorage).toBe('local')
+    expect(settingsSchema.parse({ mobileStorage: 1 }).mobileStorage).toBe('local')
   })
 
   it('preserves unknown keys so newer-version settings survive a round trip', () => {
@@ -126,16 +157,22 @@ describe('settingsSchema', () => {
       editorTextSize: 'small',
       semanticSearchEnabled: false,
       describeAssets: true,
+      contactsEnabled: false,
       mobileOnboarded: false,
+      mobileStorage: 'local',
+      mobileGraphName: '',
       theme: 'system',
       timeFormat: '12h',
       dateFormat: 'mdy',
       weekStartDay: 'monday',
       allNotesFilterTags: ['book', 'link', 'person'],
+      calendarEnabled: false,
+      calendarIds: [],
       graphColors: {},
       aiProviders: [],
       defaultAiProviderId: null,
       chatModelSelection: null,
+      aiPrompts: [],
       futureKey: true,
     })
   })
@@ -171,6 +208,16 @@ describe('settingsSchema', () => {
       expect(settingsSchema.parse({ aiProviders: [valid] }).aiProviders).toEqual([valid])
     })
 
+    it('accepts OpenRouter entries', () => {
+      const entry = {
+        id: 'openrouter',
+        provider: 'openrouter',
+        model: 'openrouter/auto',
+        keyHint: 'wxyz1',
+      }
+      expect(settingsSchema.parse({ aiProviders: [entry] }).aiProviders).toEqual([entry])
+    })
+
     it('defaults the per-entry display fields', () => {
       const entry = { id: 'abc', provider: 'openai', model: 'gpt-5.1' }
       expect(settingsSchema.parse({ aiProviders: [entry] }).aiProviders).toEqual([
@@ -188,6 +235,41 @@ describe('settingsSchema', () => {
     it('degrades a non-array value to the empty list', () => {
       expect(settingsSchema.parse({ aiProviders: 'nope' }).aiProviders).toEqual([])
       expect(settingsSchema.parse({ aiProviders: { id: 'x' } }).aiProviders).toEqual([])
+    })
+  })
+
+  describe('aiPrompts', () => {
+    const valid = {
+      id: 'prompt-1',
+      label: 'Translate to French',
+      body: 'Translate the following text to French.\n\n{{selectedText}}',
+      mode: 'replace',
+    }
+
+    it('passes valid entries through', () => {
+      expect(settingsSchema.parse({ aiPrompts: [valid] }).aiPrompts).toEqual([valid])
+    })
+
+    it('defaults an invalid mode to replace', () => {
+      const entry = { ...valid, mode: 'sideways' }
+      expect(settingsSchema.parse({ aiPrompts: [entry] }).aiPrompts).toEqual([
+        { ...valid, mode: 'replace' },
+      ])
+    })
+
+    it('drops a corrupt entry without losing the rest', () => {
+      const parsed = settingsSchema.parse({
+        aiPrompts: [valid, { label: 'no body' }, 42],
+      })
+      expect(parsed.aiPrompts).toEqual([valid])
+    })
+
+    it('degrades a non-array value to the empty list', () => {
+      expect(settingsSchema.parse({ aiPrompts: 'nope' }).aiPrompts).toEqual([])
+    })
+
+    it('defaults to the empty list (built-ins live in code)', () => {
+      expect(settingsSchema.parse({}).aiPrompts).toEqual([])
     })
   })
 

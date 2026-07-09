@@ -1,12 +1,14 @@
 import { sql } from 'kysely'
 import { foldTag } from '../markdown'
 import { db } from './db'
+import { recallOrder } from './filtered-search'
 
 /**
- * The All Notes list: every non-daily note, newest first, optionally narrowed
- * to one tag. Daily notes are excluded by design — the stream is their home —
- * which mirrors the original app's notes list (`isDaily = 0` there,
- * `daily_date IS NULL` here). Uncapped: the screen virtualizes, the row
+ * The All Notes list: every regular note, pinned first then newest, optionally
+ * narrowed to one tag. Daily notes are excluded by design — the stream is
+ * their home — and templates are boilerplate, not graph content;
+ * `kind = 'note'` expresses both (mirroring the original app's `isDaily = 0`).
+ * Uncapped: the screen virtualizes, the row
  * snippet is the stored `preview` column (derived once at index time), and
  * neither query carries a per-row parameter, so list size has no SQL ceiling.
  */
@@ -21,6 +23,8 @@ export interface NoteListEntry {
   tags: string[]
   /** File modification time (epoch ms) — the list's recency sort key. */
   mtime: number
+  /** Pinned notes lead the list (V1 order) and show a pin marker. */
+  isPinned: boolean
 }
 
 export interface NoteListOptions {
@@ -28,29 +32,44 @@ export interface NoteListOptions {
   tag?: string | null
 }
 
-/** Non-daily notes for the All Notes screen, most recently edited first. */
+/**
+ * Non-daily notes for the All Notes screen: pinned first (explicit pin order,
+ * then unordered pins), then most recently edited — V1's list order.
+ */
 export async function listNotes(options: NoteListOptions = {}): Promise<NoteListEntry[]> {
   const tag = options.tag ?? null
 
-  const rows =
+  let listQuery =
     tag === null
-      ? await db
+      ? db
           .selectFrom('notes')
-          .where('notes.dailyDate', 'is', null)
-          .select(['notes.path', 'notes.title', 'notes.mtime', 'notes.preview'])
-          .orderBy('notes.mtime', 'desc')
-          .orderBy('notes.path')
-          .execute()
-      : await db
+          .where('notes.kind', '=', 'note')
+          .select([
+            'notes.path',
+            'notes.title',
+            'notes.mtime',
+            'notes.preview',
+            'notes.isPinned',
+            'notes.pinnedOrder',
+          ])
+      : db
           .selectFrom('tags')
           .innerJoin('notes', 'notes.path', 'tags.notePath')
           .where('tags.tagKey', '=', foldTag(tag))
-          .where('notes.dailyDate', 'is', null)
-          .select(['notes.path', 'notes.title', 'notes.mtime', 'notes.preview'])
+          .where('notes.kind', '=', 'note')
+          .select([
+            'notes.path',
+            'notes.title',
+            'notes.mtime',
+            'notes.preview',
+            'notes.isPinned',
+            'notes.pinnedOrder',
+          ])
           .distinct()
-          .orderBy('notes.mtime', 'desc')
-          .orderBy('notes.path')
-          .execute()
+  for (const order of recallOrder(true)) {
+    listQuery = listQuery.orderBy(order)
+  }
+  const rows = await listQuery.execute()
 
   if (rows.length === 0) {
     return []
@@ -64,7 +83,7 @@ export async function listNotes(options: NoteListOptions = {}): Promise<NoteList
       ? await db
           .selectFrom('tags')
           .innerJoin('notes', 'notes.path', 'tags.notePath')
-          .where('notes.dailyDate', 'is', null)
+          .where('notes.kind', '=', 'note')
           .select(['tags.notePath', 'tags.tag'])
           // Order on the folded key so a row's tags read in the same alphabetical
           // order as the facet list, regardless of display casing.
@@ -75,7 +94,7 @@ export async function listNotes(options: NoteListOptions = {}): Promise<NoteList
           .innerJoin('notes', 'notes.path', 'tags.notePath')
           .innerJoin('tags as filterTags', 'filterTags.notePath', 'notes.path')
           .where('filterTags.tagKey', '=', foldTag(tag))
-          .where('notes.dailyDate', 'is', null)
+          .where('notes.kind', '=', 'note')
           .select(['tags.notePath', 'tags.tag'])
           .distinct()
           .orderBy('tags.tagKey')
@@ -96,6 +115,7 @@ export async function listNotes(options: NoteListOptions = {}): Promise<NoteList
     mtime: row.mtime,
     snippet: row.preview,
     tags: tagsByPath.get(row.path) ?? [],
+    isPinned: row.isPinned !== 0,
   }))
 }
 
@@ -131,7 +151,7 @@ export async function listRecentNotes(options: RecentNotesOptions): Promise<Rece
     tag === null
       ? await db
           .selectFrom('notes')
-          .where('notes.dailyDate', 'is', null)
+          .where('notes.kind', '=', 'note')
           .where('notes.isPrivate', '=', 0)
           .select(['notes.path', 'notes.title', 'notes.preview', 'notes.mtime', 'notes.isPrivate'])
           .orderBy('notes.mtime', 'desc')
@@ -142,7 +162,7 @@ export async function listRecentNotes(options: RecentNotesOptions): Promise<Rece
           .selectFrom('tags')
           .innerJoin('notes', 'notes.path', 'tags.notePath')
           .where('tags.tagKey', '=', foldTag(tag))
-          .where('notes.dailyDate', 'is', null)
+          .where('notes.kind', '=', 'note')
           .where('notes.isPrivate', '=', 0)
           .select(['notes.path', 'notes.title', 'notes.preview', 'notes.mtime', 'notes.isPrivate'])
           .distinct()
@@ -169,7 +189,7 @@ export async function listNoteTags(): Promise<NoteTagFacet[]> {
   return db
     .selectFrom('tags')
     .innerJoin('notes', 'notes.path', 'tags.notePath')
-    .where('notes.dailyDate', 'is', null)
+    .where('notes.kind', '=', 'note')
     .select([sql<string>`min(tags.tag)`.as('tag'), sql<number>`count(*)`.as('count')])
     .groupBy('tags.tagKey')
     .orderBy('tags.tagKey')

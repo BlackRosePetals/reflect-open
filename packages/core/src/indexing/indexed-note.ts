@@ -1,7 +1,9 @@
 import { z } from 'zod'
-import { dateFromDailyPath, isDaily } from '../graph/paths'
+import { dateFromDailyPath, isDaily, isTemplatePath } from '../graph/paths'
 import {
   detectConflictMarkers,
+  extractEmailFields,
+  foldEmail,
   foldKey,
   foldTag,
   gistBodyHash,
@@ -9,6 +11,7 @@ import {
   normalizeWikiTarget,
   pinnedOrder,
   splitFrontmatter,
+  subjectAliases,
   type ParsedNote,
 } from '../markdown'
 import { previewSnippet } from './snippet'
@@ -50,8 +53,18 @@ import { previewSnippet } from './snippet'
  * collapsed, not just percent-decoded): the `assets` projection's keys change,
  * so the bump rebuilds them — the privacy gate matches them against the
  * canonical on-disk path.
+ * 11 — `tasks` projection limited to round Meowdown task checkboxes (`+ [ ]` /
+ * `+ [x]`), excluding square checklist checkboxes from the aggregate Tasks view.
+ * 12 — `notes.kind` (daily / note / template): templates are indexed but
+ * excluded from note surfaces, so rows must carry the kind.
+ * 13 — `note_emails` projection (`- Email:` contact-field bullets): existing
+ * person notes carry no email rows until reprojected, and attendee → note
+ * resolution in the calendar flow needs them, so the bump backfills them.
+ * 14 — v1 subject aliases (`//` segments of the title) folded into the
+ * `aliases` projection: existing v1-style titles carry no derived alias rows
+ * until reprojected, so the bump backfills them.
  */
-export const PROJECTION_VERSION = 10
+export const PROJECTION_VERSION = 14
 
 export const indexedLinkSchema = z.object({
   kind: z.enum(['wiki', 'md']),
@@ -78,6 +91,14 @@ export const indexedAliasSchema = z.object({
 })
 export type IndexedAlias = z.infer<typeof indexedAliasSchema>
 
+export const indexedEmailSchema = z.object({
+  /** Display casing (as written in the field bullet). */
+  email: z.string(),
+  /** Case-folded match key ({@link foldEmail}) — what resolution compares against. */
+  emailKey: z.string(),
+})
+export type IndexedEmail = z.infer<typeof indexedEmailSchema>
+
 export const indexedTaskSchema = z.object({
   /** Character offset of the marker's `[` in the file (UTF-16 units) — the row PK with `path`. */
   markerOffset: z.number(),
@@ -91,11 +112,17 @@ export const indexedTaskSchema = z.object({
 })
 export type IndexedTask = z.infer<typeof indexedTaskSchema>
 
+/** What a `notes` row is: part of the graph (daily/note) or a template. */
+export const noteKindSchema = z.enum(['daily', 'note', 'template'])
+export type NoteKind = z.infer<typeof noteKindSchema>
+
 export const indexedNoteSchema = z.object({
   path: z.string(),
   id: z.string().nullable(),
   title: z.string(),
   titleKey: z.string(),
+  /** Derived from the path; templates are excluded from note surfaces. */
+  kind: noteKindSchema,
   dailyDate: z.string().nullable(),
   isPrivate: z.boolean(),
   isPinned: z.boolean(),
@@ -112,8 +139,9 @@ export const indexedNoteSchema = z.object({
   text: z.string(),
   /**
    * Description text of the note's referenced assets (Plan 20), folded into the
-   * FTS `body` only — not the preview or AI-reachable text. Empty when the note
-   * has no described assets.
+   * FTS `body` only — not the preview or the note text AI reads (chat reaches
+   * descriptions solely via the read_assets tool and its live privacy gate).
+   * Empty when the note has no described assets.
    */
   assetText: z.string(),
   /** The All Notes row snippet, derived once here rather than per query. */
@@ -121,11 +149,36 @@ export const indexedNoteSchema = z.object({
   links: z.array(indexedLinkSchema),
   tags: z.array(indexedTagSchema),
   aliases: z.array(indexedAliasSchema),
+  /** Emails the note owns via `- Email:` contact-field bullets. */
+  emails: z.array(indexedEmailSchema),
   assets: z.array(z.string()),
-  /** GFM checkbox rows for the Tasks projection (Plan 18). */
+  /** Reflect task rows for the Tasks projection (Plan 18). */
   tasks: z.array(indexedTaskSchema),
 })
 export type IndexedNote = z.infer<typeof indexedNoteSchema>
+
+/**
+ * The `aliases` projection: `aliases:` frontmatter verbatim, then the v1
+ * subject aliases derived from the title (`Charlotte MacCaw // Mum`), skipping
+ * segments a frontmatter alias already claims. The derived rows are index-only
+ * compatibility — the file's frontmatter is never rewritten to hold them.
+ */
+function noteAliases(parsed: ParsedNote): IndexedAlias[] {
+  const aliases: IndexedAlias[] = parsed.frontmatter.aliases.map((alias) => ({
+    alias,
+    aliasKey: foldKey(alias),
+  }))
+  const claimed = new Set(aliases.map((row) => row.aliasKey))
+  for (const alias of subjectAliases(parsed.title)) {
+    const aliasKey = foldKey(alias)
+    if (claimed.has(aliasKey)) {
+      continue
+    }
+    claimed.add(aliasKey)
+    aliases.push({ alias, aliasKey })
+  }
+  return aliases
+}
 
 /**
  * Flatten a parsed note into the index payload. `meta.source` is the raw
@@ -152,12 +205,14 @@ export function buildIndexedNote(
     posFrom: link.from,
     posTo: link.to,
   }))
+  const body = splitFrontmatter(meta.source).body
 
   return {
     path: parsed.path,
     id: parsed.id ?? null,
     title: parsed.title,
     titleKey: foldKey(parsed.title),
+    kind: isDaily(parsed.path) ? 'daily' : isTemplatePath(parsed.path) ? 'template' : 'note',
     dailyDate: isDaily(parsed.path) ? dateFromDailyPath(parsed.path) : null,
     isPrivate: parsed.frontmatter.private,
     isPinned: isPinned(parsed.frontmatter),
@@ -168,8 +223,7 @@ export function buildIndexedNote(
     // writes the `gist` block itself, and a pin/private toggle is not an edit
     // worth a "republish" nudge.
     gistStale:
-      parsed.frontmatter.gist !== undefined &&
-      gistBodyHash(splitFrontmatter(meta.source).body) !== parsed.frontmatter.gist.hash,
+      parsed.frontmatter.gist !== undefined && gistBodyHash(body) !== parsed.frontmatter.gist.hash,
     fileHash: meta.fileHash,
     mtime: meta.mtime,
     text: parsed.text,
@@ -177,10 +231,8 @@ export function buildIndexedNote(
     preview: previewSnippet(parsed.text, parsed.title),
     links: [...wikiLinks, ...mdLinks],
     tags: parsed.tags.map((tag) => ({ tag, tagKey: foldTag(tag) })),
-    aliases: parsed.frontmatter.aliases.map((alias) => ({
-      alias,
-      aliasKey: foldKey(alias),
-    })),
+    aliases: noteAliases(parsed),
+    emails: extractEmailFields(body).map((email) => ({ email, emailKey: foldEmail(email) })),
     assets: parsed.assets.map((asset) => asset.path),
     tasks: parsed.tasks.map((task) => ({
       markerOffset: task.markerOffset,

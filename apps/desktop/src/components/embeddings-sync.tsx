@@ -1,11 +1,12 @@
 import { useEffect, useRef } from 'react'
-import { embedNote, embedRemove, isNotePath, subscribeFileChanges } from '@reflect/core'
+import { embedNote, embedRemove, isNotePath, subscribeIndexApplied } from '@reflect/core'
 import {
   backfillEmbeddingsVisibly,
   consumeLegacySemanticOptIn,
   ensureEmbeddingsVisibly,
 } from '@/lib/semantic'
 import { useEmbedStatus } from '@/lib/use-embed-status'
+import { isMainWindow } from '@/lib/windows/window-role'
 import { useGraph } from '@/providers/graph-provider'
 import { useSettings } from '@/providers/settings-provider'
 
@@ -19,10 +20,19 @@ import { useSettings } from '@/providers/settings-provider'
  *   first download starts);
  * - run one incremental backfill per graph-open once `ready` (hash-skip makes
  *   this cheap when nothing changed);
- * - follow the watcher: changed notes re-embed, deleted notes drop vectors.
+ * - follow the index: changed notes re-embed, deleted notes drop vectors.
  *   Work is serialized on one queue so passes can't interleave.
  *
- * Backfill and watcher work need the runtime `ready` *and* the setting on:
+ * The follow trigger is `subscribeIndexApplied` — the post-apply signal — not
+ * the raw watcher stream, for two reasons. Ordering: `embed_apply` drops
+ * chunks for paths without a `notes` row, so embedding a brand-new note off
+ * the raw file event could race its index apply and lose the chunks until the
+ * next backfill; post-apply, the row is always there. Coverage: asset
+ * description writes re-index their referencing notes *outside* the watcher
+ * pipeline (`reindexNotesReferencing` emits the same signal), and those notes
+ * must re-embed for the description text to reach semantic search.
+ *
+ * Backfill and follow work need the runtime `ready` *and* the setting on:
  * disabling semantic search pauses embedding work immediately (the loaded
  * model just idles for the rest of the session), and re-enabling catches up
  * via the cheap hash-skip backfill.
@@ -37,7 +47,9 @@ export function EmbeddingsSync(): null {
   // the file-write generation in GraphInfo — the counters are independent.
   const generation = indexGeneration
   const root = graph?.root ?? null
-  const enabled = settings.semanticSearchEnabled
+  // Main window only: a secondary note window loading the model and
+  // re-embedding on the same watcher stream would duplicate every write.
+  const enabled = settings.semanticSearchEnabled && isMainWindow()
   const ready = status.status === 'ready'
   const modelId = status.status === 'ready' ? status.model : null
 
@@ -58,16 +70,15 @@ export function EmbeddingsSync(): null {
     }
   }, [enabled, status.status])
 
-  // One backfill per (graph, model) once ready, then live watcher follow-up.
-  // `enabled` is part of the gate so a mid-session disable tears this down:
-  // pending queue items see `active` go false and skip, and the watcher
-  // unsubscribes.
+  // One backfill per (graph, model) once ready, then live post-apply
+  // follow-up. `enabled` is part of the gate so a mid-session disable tears
+  // this down: pending queue items see `active` go false and skip, and the
+  // subscription drops.
   useEffect(() => {
     if (!enabled || !ready || generation === null || root === null || modelId === null) {
       return
     }
     let active = true
-    let unlisten: (() => void) | null = null
 
     queue.current = queue.current
       .then(() => {
@@ -79,18 +90,18 @@ export function EmbeddingsSync(): null {
         )
       })
       .catch((cause) => {
-        // A rejection here must not poison the queue (later watcher items
+        // A rejection here must not poison the queue (later change items
         // chain off this promise) nor masquerade as a per-change failure.
         console.error('embedding backfill failed:', cause)
       })
 
-    void subscribeFileChanges((changes) => {
-      if (!active) {
-        return
+    const unlisten = subscribeIndexApplied((changes, appliedGeneration) => {
+      if (!active || appliedGeneration !== generation) {
+        return // torn down, or a delayed emit from a superseded index session
       }
       for (const change of changes) {
         if (!isNotePath(change.path)) {
-          continue // audio-memo recordings ride the same stream — never embedded
+          continue // asset-file changes ride the same batches — never embedded
         }
         queue.current = queue.current
           .then(() => {
@@ -105,17 +116,11 @@ export function EmbeddingsSync(): null {
             console.error(`embedding sync failed for ${change.path}:`, cause)
           })
       }
-    }).then((fn) => {
-      if (active) {
-        unlisten = fn
-      } else {
-        fn()
-      }
     })
 
     return () => {
       active = false
-      unlisten?.()
+      unlisten()
     }
   }, [enabled, ready, generation, root, modelId])
 

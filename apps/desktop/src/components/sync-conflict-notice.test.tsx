@@ -1,17 +1,19 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getNote, type GraphInfo } from '@reflect/core'
+import { getNote, readNote, type GraphInfo } from '@reflect/core'
+import { setPlatformSurface } from '@/lib/platform-surface'
 import { SyncConflictNotice } from './sync-conflict-notice'
 
 vi.mock('@reflect/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@reflect/core')>()),
   hasBridge: () => true,
   getNote: vi.fn(),
+  readNote: vi.fn(),
 }))
 
 const graphState = vi.hoisted(() => ({
-  graph: { root: '/g', name: 'G', cloudSync: null, generation: 3 } as GraphInfo | null,
+  graph: { root: '/g', name: 'G', generation: 3 } as GraphInfo | null,
   indexGeneration: 7 as number | null,
 }))
 vi.mock('@/providers/graph-provider', () => ({ useGraph: () => graphState }))
@@ -47,6 +49,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   queryClient.clear()
+  setPlatformSurface({ mobileApp: false })
   vi.clearAllMocks()
 })
 
@@ -81,5 +84,30 @@ describe('SyncConflictNotice', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /keep both/i }))
     expect(resolution.resolve).toHaveBeenCalledWith('both')
+  })
+
+  it('offers the same resolution actions on mobile', async () => {
+    setPlatformSurface({ mobileApp: true })
+    vi.mocked(getNote).mockResolvedValue(NOTE)
+    renderNotice()
+
+    expect(await screen.findByText(/choose what to keep/i)).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('button', { name: /keep this device’s version/i }))
+    expect(resolution.resolve).toHaveBeenCalledWith('ours')
+  })
+
+  it('pluralizes the buttons for a stacked three-plus-way conflict', async () => {
+    vi.mocked(getNote).mockResolvedValue(NOTE)
+    vi.mocked(readNote).mockResolvedValue(
+      '<<<<<<< Mac\nmac\n=======\nphone\n>>>>>>> iPhone\n<<<<<<< Mac\n=======\nipad\n>>>>>>> iPad\n',
+    )
+    renderNotice()
+
+    // `theirs` splices in every non-first side — naming one device would lie.
+    expect(await screen.findByRole('button', { name: 'Keep the other versions' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Keep all' })).toBeTruthy()
+    // The first side is still a single device, so it stays named.
+    expect(screen.getByRole('button', { name: 'Keep “Mac”' })).toBeTruthy()
   })
 })

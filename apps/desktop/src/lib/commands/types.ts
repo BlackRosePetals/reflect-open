@@ -1,4 +1,5 @@
 import type { Route } from '@/routing/route'
+import type { NavigateOptions } from '@/routing/router'
 
 /**
  * The typed command contract (Plan 08): one registry powers the ⌘K palette,
@@ -8,7 +9,7 @@ import type { Route } from '@/routing/route'
  */
 
 export interface CommandContext {
-  navigate: (route: Route) => void
+  navigate: (route: Route, options?: NavigateOptions) => void
   /** The current route, read at run time. */
   route: () => Route
   /**
@@ -20,11 +21,15 @@ export interface CommandContext {
   notePath: () => string | null
   back: () => void
   forward: () => void
+  /** Discard the current view's saved scroll offsets so it re-anchors when revisited. */
+  clearScrollState: () => void
   toggleTheme: () => void
   /** Collapse/expand the workspace sidebar. */
   toggleSidebar: () => void
   /** Start a fresh chat conversation. */
   newChat: () => void
+  /** Switch to a recent graph by zero-based position in the graph switcher. */
+  switchGraph: (index: number) => void
   /** Start an audio memo, or stop-and-save the one recording. */
   toggleAudioMemo: () => void
   /**
@@ -37,6 +42,10 @@ export interface CommandContext {
   openPalette: (query?: string) => void
   /** Open the ⌘/ shortcuts cheat-sheet. */
   openShortcuts: () => void
+  /** Open the "Insert template…" picker (inserts into {@link notePath}'s editor). */
+  openTemplatePicker: () => void
+  /** Open the "New template" name dialog. */
+  openTemplateCreate: () => void
   /**
    * Persist the semantic-search opt-in (`semanticSearchEnabled`).
    * EmbeddingsSync reacts to the setting by loading — first time:

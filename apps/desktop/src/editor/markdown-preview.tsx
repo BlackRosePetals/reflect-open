@@ -1,7 +1,5 @@
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { MarkdownView } from '@meowdown/react'
-import '@meowdown/core/style.css'
-import '@meowdown/react/style.css'
 import { openExternalLink } from '@/editor/open-external-link'
 import { cn } from '@/lib/utils'
 
@@ -23,9 +21,10 @@ interface MarkdownPreviewProps {
   resolveImageUrl?: (src: string) => string | null
   /**
    * Navigate a clicked `[[wiki link]]` target. Omitted, links render as
-   * inert chips (the palette preview's behavior).
+   * inert chips (the palette preview's behavior). `event` carries the
+   * originating click so handlers can honor ⌘-click (open in new window).
    */
-  onWikiLinkClick?: (target: string) => void
+  onWikiLinkClick?: (target: string, event?: MouseEvent | KeyboardEvent) => void
   /** Extra classes for the rendered root. */
   className?: string
 }
@@ -57,7 +56,8 @@ export function MarkdownPreview({
     [],
   )
   const onWikilinkClickStable = useCallback(
-    (payload: { target: string }) => navigateRef.current?.(payload.target),
+    (payload: { target: string; event: MouseEvent | KeyboardEvent }) =>
+      navigateRef.current?.(payload.target, payload.event),
     [],
   )
 

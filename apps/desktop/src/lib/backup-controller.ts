@@ -28,8 +28,9 @@ import {
 import { setBackupFlusher } from '@/lib/backup-flush'
 import { invalidateGithubAuth } from '@/lib/github-auth-state'
 import { startOperation } from '@/lib/operations'
+import { isMobileSurface } from '@/lib/platform-surface'
 import { providerFetch } from '@/lib/provider-fetch'
-import { invalidateIndexQueries } from '@/lib/query-client'
+import { throttledInvalidateIndexQueries } from '@/lib/query-client'
 
 /**
  * Backup state as the UI sees it. `connected` means the graph has a repo and
@@ -37,6 +38,10 @@ import { invalidateIndexQueries } from '@/lib/query-client'
  * remotes (which additionally require the stored GitHub credential) and
  * `null` for hand-wired generic remotes (Plan 16: GitLab/Gitea/self-hosted
  * over SSH, or a bare path repo), whose credentials resolve locally in Rust.
+ *
+ * `disconnected` means no *backup*: on desktop such graphs still run the
+ * local-history commit loop (see `startLocalHistory`), which the UI never
+ * surfaces.
  */
 export type BackupState =
   | { phase: 'loading' }
@@ -45,6 +50,26 @@ export type BackupState =
 
 /** Outcome of connecting to an existing repo (the public case needs consent). */
 export type ConnectExistingResult = 'connected' | 'needsPublicConfirm' | 'notFound'
+
+/**
+ * A single foreground/resume transition fires several DOM events at once —
+ * WKWebView emits both `visibilitychange` and `focus` on app resume, desktop
+ * unminimize can too. Each would queue its own full engine cycle (single
+ * flight queues a *follow-up*, it doesn't drop the second call), doubling
+ * the network work of every resume; triggers inside this window collapse
+ * into one cycle.
+ */
+const RESUME_SYNC_DEDUPE_MS = 1500
+
+/**
+ * Quiet period after the last edit before a backup commit, on mobile.
+ * Desktop keeps the engine's 30s default, but mobile foreground sessions are
+ * often shorter than that — with the desktop window most edit-triggered
+ * cycles would never fire before backgrounding, deferring every push to the
+ * *next* app open. (Capture is still never lost either way: the background
+ * flush commits locally.)
+ */
+const MOBILE_IDLE_MS = 10_000
 
 export interface BackupControllerOptions {
   graph: GraphInfo
@@ -61,9 +86,9 @@ export interface BackupControllerOptions {
  * the provider shrinks to a `useSyncExternalStore` shim.
  *
  * Owns: the connection probe, the sync engine, the watcher subscription that
- * feeds its debounce, window focus/online listeners (launch, focus, and
- * back-online pulls), the quit-commit hook, and the connect / disconnect /
- * sign-out / back-up-now actions.
+ * feeds its debounce, the resume triggers (launch, window focus, visibility →
+ * visible for mobile app resume, and back-online pulls), the quit-commit
+ * hook, and the connect / disconnect / sign-out / back-up-now actions.
  */
 export interface BackupController {
   /** Probe the graph and start the engine if fully connected. Idempotent. */
@@ -148,8 +173,72 @@ export function createBackupController(options: BackupControllerOptions): Backup
     emitFileChanges(changes)
     const indexable = changes.filter((change) => isNotePath(change.path))
     if (indexGeneration !== null && indexable.length > 0) {
-      void applyIndexChanges(indexable, indexGeneration).then(invalidateIndexQueries)
+      void applyIndexChanges(indexable, indexGeneration).then((mutations) => {
+        if (mutations > 0) {
+          throttledInvalidateIndexQueries()
+        }
+      })
     }
+  }
+
+  /**
+   * Wire an engine into the watcher (which feeds its debounce) and the
+   * quit-time flusher. Returns false when teardown or a restart won the race
+   * against the subscribe — the engine is already stopped in that case.
+   */
+  async function adoptEngine(next: SyncEngine): Promise<boolean> {
+    engine = next
+    // Spooled capture envelopes (`.reflect/inbox/`) are git-ignored and
+    // drained within seconds — they must not tick the commit debounce. The
+    // drain's own note writes arrive as ordinary changes right after.
+    const subscription = await subscribeFileChanges((changes) => {
+      if (changes.some((change) => !isCaptureSpoolPath(change.path))) {
+        next.noteChanged()
+      }
+    })
+    if (disposed || engine !== next) {
+      subscription()
+      next.stop()
+      return false
+    }
+    unlisten = subscription
+    // Quit-time commit (local only — never a network push on the way out).
+    setBackupFlusher(async () => {
+      await gitCommitAll('Update notes', generation)
+    })
+    return true
+  }
+
+  /**
+   * Local history (desktop only): a graph with no remote still gets a
+   * repository and the debounced commit loop, so every edit lands in Git
+   * history and stays revertable — nothing is ever fetched or pushed, and
+   * the UI stays `disconnected`. Connecting a backup later adopts this
+   * repository, history included.
+   */
+  async function startLocalHistory(initialized: boolean): Promise<void> {
+    if (isMobileSurface()) {
+      return
+    }
+    if (!initialized) {
+      await gitSetup(null, null, generation)
+    }
+    const next = createSyncEngine({
+      generation,
+      localOnly: true,
+      getToken: async () => null,
+      onStatus: (engineStatus) => {
+        // No UI surfaces local history, so a failing commit loop (disk full,
+        // corrupted repo) must at least leave a trace for diagnosis.
+        if (engineStatus.state === 'error') {
+          console.error('local history commit failed:', engineStatus.message)
+        }
+      },
+    })
+    if (!(await adoptEngine(next))) {
+      return
+    }
+    void next.syncNow() // first snapshot: commit whatever is already pending
   }
 
   async function start(): Promise<void> {
@@ -165,6 +254,7 @@ export function createBackupController(options: BackupControllerOptions): Backup
       }
       if (!status.initialized || status.remoteUrl === null) {
         setState({ phase: 'disconnected' })
+        await startLocalHistory(status.initialized)
         return
       }
       const remoteUrl = status.remoteUrl
@@ -197,6 +287,7 @@ export function createBackupController(options: BackupControllerOptions): Backup
       }
       const next = createSyncEngine({
         generation,
+        ...(isMobileSurface() ? { idleMs: MOBILE_IDLE_MS } : {}),
         // The managed token is for github.com only — a generic host must
         // never receive it. Rust resolves generic credentials locally.
         getToken: repo === null ? async () => null : () => getGithubToken(providerFetch),
@@ -210,41 +301,39 @@ export function createBackupController(options: BackupControllerOptions): Backup
         },
         onRemoteChanges,
       })
-      engine = next
       setState({ phase: 'connected', remoteUrl, repo, status: { state: 'idle' } })
-
-      // Spooled capture envelopes (`.reflect/inbox/`) are git-ignored and
-      // drained within seconds — they must not tick the commit debounce. The
-      // drain's own note writes arrive as ordinary changes right after.
-      const subscription = await subscribeFileChanges((changes) => {
-        if (changes.some((change) => !isCaptureSpoolPath(change.path))) {
-          next.noteChanged()
-        }
-      })
-      if (disposed || engine !== next) {
-        // Teardown (or a restart) won the race against the subscribe.
-        subscription()
-        next.stop()
+      if (!(await adoptEngine(next))) {
         return
       }
-      unlisten = subscription
 
-      const onFocus = (): void => {
+      // Resume triggers: window focus (desktop refocus) and visibility →
+      // visible (mobile app resume; desktop unminimize, which doesn't
+      // reliably fire `focus`). Deduped — see RESUME_SYNC_DEDUPE_MS.
+      let lastResumeSyncAt = 0
+      const onResume = (): void => {
+        const now = Date.now()
+        if (now - lastResumeSyncAt < RESUME_SYNC_DEDUPE_MS) {
+          return
+        }
+        lastResumeSyncAt = now
         void next.syncNow()
+      }
+      const onVisibilityChange = (): void => {
+        if (document.visibilityState === 'visible') {
+          onResume()
+        }
       }
       const onOnline = (): void => {
         void next.syncNow() // the `offline` state's recovery trigger
       }
-      window.addEventListener('focus', onFocus)
+      window.addEventListener('focus', onResume)
+      document.addEventListener('visibilitychange', onVisibilityChange)
       window.addEventListener('online', onOnline)
       domDisposers.push(
-        () => window.removeEventListener('focus', onFocus),
+        () => window.removeEventListener('focus', onResume),
+        () => document.removeEventListener('visibilitychange', onVisibilityChange),
         () => window.removeEventListener('online', onOnline),
       )
-      // Quit-time commit (local only — never a network push on the way out).
-      setBackupFlusher(async () => {
-        await gitCommitAll('Update notes', generation)
-      })
 
       void next.syncNow() // launch pull: pick up other devices' changes
     } catch (error) {

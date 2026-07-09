@@ -1,146 +1,124 @@
 import { useState, type ReactElement } from 'react'
-import {
-  getGithubToken,
-  githubRemoteUrl,
-  gitClone,
-  ReflectError,
-  type GithubUser,
-} from '@reflect/core'
+import { Cloud, HardDrive } from 'lucide-react'
 import { InlineAlert } from '@/components/inline-alert'
-import { GithubAuthStep } from '@/components/settings/github-auth-step'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import { Spinner } from '@/components/ui/spinner'
 import { useAsyncAction } from '@/hooks/use-async-action'
-import { parseRepoInput } from '@/lib/github-repos'
-import { providerFetch } from '@/lib/provider-fetch'
+import { OnboardingIcloudHeader } from '@/mobile/onboarding-icloud-header'
+import { OnboardingIcloudSection } from '@/mobile/onboarding-icloud-section'
 import { useGraph } from '@/providers/graph-provider'
 
-type Step = 'choose' | 'auth' | 'repo'
+/** Which control kicked off the in-flight choice, so only that one shows the
+ * spinner/pending label (every button still disables). Container graph roots
+ * are absolute paths, so the fixed tags can never collide with one. */
+type PendingChoice = string | 'icloud-create' | 'local' | null
 
 /**
- * The mobile first-run screen (Plan 19, step 6) — shown until the user picks
- * how to start, gated by the `mobileOnboarded` setting in {@link GraphProvider}.
+ * The mobile first-run screen (Plans 19/21) — shown until the user picks
+ * where their notes live, gated by the `mobileOnboarded` setting in
+ * {@link GraphProvider}.
  *
- * **Start fresh** opens the empty fixed root, which bootstraps a new graph
- * (and seeds the welcome note). **Connect to GitHub** signs in with the shared
- * device flow ({@link GithubAuthStep}), then clones the chosen backup repo
- * *straight into* the fixed root — `git_clone` refuses a non-empty directory,
- * so this only works while the root is still untouched, which is exactly why
- * the provider defers opening until now. Both paths end in
- * `completeOnboarding`, which opens the root and records the flag.
+ * iCloud Drive leads (Plan 21): it is the primary way notes sync between
+ * iPhone and Mac, so the hero block ({@link OnboardingIcloudSection}) either
+ * continues with iCloud or lists existing note sets in the app's iCloud
+ * container. **Keep notes on this device** opens the app-sandbox root instead.
+ * Every path ends in `completeOnboarding(kind, root)`, which opens the chosen
+ * root and records the flag + storage kind + graph name.
+ *
+ * The screen renders before the iCloud container has resolved (the boot no
+ * longer waits on it — see `useMobileGraphBoot`): while
+ * `mobileStorageResolving` is set the iCloud card shows a pending row
+ * instead of vanishing, since a null container root only means "signed out"
+ * once the lookup finished.
  */
 export function MobileOnboardingScreen(): ReactElement {
-  const { mobileRoot, completeOnboarding } = useGraph()
+  const { mobileStorageInfo, mobileStorageResolving, completeOnboarding } = useGraph()
   const action = useAsyncAction()
-  const [step, setStep] = useState<Step>('choose')
-  const [repoInput, setRepoInput] = useState('')
-  const [user, setUser] = useState<GithubUser | null>(null)
+  const [pendingChoice, setPendingChoice] = useState<PendingChoice>(null)
 
-  function startFresh(): void {
-    void action.run(completeOnboarding)
-  }
+  const icloudDocumentsRoot = mobileStorageInfo?.icloudDocumentsRoot ?? null
+  const icloudReady = icloudDocumentsRoot !== null
+  // While the container is still resolving, the section renders in a pending
+  // state instead of vanishing — "no iCloud" is only honest once known.
+  const icloudPending = !icloudReady && mobileStorageResolving
+  const icloudGraphs = mobileStorageInfo?.icloudGraphRoots ?? []
 
-  function downloadAndOpen(): void {
-    // A bare name belongs to the signed-in account — the common case never
-    // needs the owner typed (mirrors the desktop restore dialog).
-    const trimmed = repoInput.trim()
-    const normalized =
-      !trimmed.includes('/') && trimmed.length > 0 && user !== null
-        ? `${user.login}/${trimmed}`
-        : trimmed
-    const ref = parseRepoInput(normalized)
-    if (ref === null) {
-      action.setError('Enter the repository name (or owner/name for another account).')
-      return
-    }
-    if (mobileRoot === null) {
-      action.setError('No graph folder available.')
-      return
-    }
-    void action.run(async () => {
-      const token = await getGithubToken(providerFetch)
-      if (token === null) {
-        throw new ReflectError('auth', 'Sign in to GitHub first')
-      }
-      await gitClone(githubRemoteUrl(ref), mobileRoot, token)
-      await completeOnboarding() // opens the clone; the index rebuilds from the files
-    })
+  function runChoice(choice: Exclude<PendingChoice, null>, task: () => Promise<void>): void {
+    setPendingChoice(choice)
+    void action.run(task).finally(() => setPendingChoice(null))
   }
 
   return (
     <div
-      className="flex h-dvh w-screen flex-col justify-center gap-6 px-8"
+      className="flex min-h-dvh w-screen overflow-auto bg-surface-app px-5 text-text"
       style={{
-        paddingTop: 'env(safe-area-inset-top)',
+        paddingTop: 'max(env(safe-area-inset-top), 1.5rem)',
         paddingBottom: 'max(env(safe-area-inset-bottom), 1rem)',
       }}
     >
-      <div className="flex flex-col gap-1.5 text-center">
-        <h1 className="text-lg font-semibold">Welcome to Reflect</h1>
-        <p className="text-sm text-text-muted">
-          {step === 'choose'
-            ? 'Start a new graph, or connect one you already back up to GitHub.'
-            : 'Sign in to GitHub, then choose the repository to download.'}
-        </p>
-      </div>
+      <div className="mx-auto flex w-full max-w-md flex-col gap-7 py-6">
+        <header className="flex flex-col gap-4 pt-2">
+          <div className="flex size-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
+            <Cloud aria-hidden className="size-5" strokeWidth={1.75} />
+          </div>
+          <div className="space-y-2">
+            <h1 className="text-[28px] font-semibold leading-tight tracking-tight">
+              Start with iCloud sync
+            </h1>
+            <p className="text-sm leading-6 text-text-secondary">
+              Keep your notes up to date across iPhone, iPad, and Mac with iCloud Drive.
+            </p>
+          </div>
+        </header>
 
-      {step === 'choose' ? (
-        <div className="flex flex-col gap-2">
-          <Button onClick={startFresh} disabled={action.pending}>
-            {action.pending ? 'Setting up…' : 'Start fresh'}
-          </Button>
-          <Button variant="outline" onClick={() => setStep('auth')} disabled={action.pending}>
-            Connect to GitHub
-          </Button>
-        </div>
-      ) : step === 'auth' ? (
-        <div className="flex flex-col gap-3">
-          <GithubAuthStep
-            onAuthed={(authedUser) => {
-              setUser(authedUser)
-              setStep('repo')
-            }}
-          />
-          <BackLink onClick={() => setStep('choose')} disabled={action.pending} />
-        </div>
-      ) : (
-        <div className="flex flex-col gap-3">
-          <label className="flex flex-col gap-1">
-            <span className="text-xs font-medium text-text-secondary">Backup repository</span>
-            <Input
-              autoFocus
-              value={repoInput}
-              onChange={(event) => setRepoInput(event.target.value)}
-              placeholder={user !== null ? `${user.login}/…` : 'owner/name'}
+        <div className="flex flex-col gap-4">
+          {icloudReady || icloudPending ? (
+            <OnboardingIcloudSection
+              pending={icloudPending}
+              documentsRoot={icloudDocumentsRoot}
+              graphs={icloudGraphs}
+              busy={action.pending}
+              pendingChoice={pendingChoice}
+              onOpen={(root) => runChoice(root, () => completeOnboarding('icloud', root))}
+              onCreate={(root) =>
+                runChoice('icloud-create', () => completeOnboarding('icloud', root))
+              }
             />
-          </label>
-          <Button onClick={downloadAndOpen} disabled={action.pending}>
-            {action.pending ? 'Downloading…' : 'Download & open'}
-          </Button>
-          <BackLink onClick={() => setStep('choose')} disabled={action.pending} />
-        </div>
-      )}
+          ) : (
+            <IcloudUnavailableSection />
+          )}
 
-      {action.error !== null ? <InlineAlert tone="error">{action.error}</InlineAlert> : null}
+          <div className="flex flex-col items-center gap-1 px-4 text-center">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-text-secondary"
+              onClick={() => runChoice('local', () => completeOnboarding('local'))}
+              disabled={action.pending || mobileStorageInfo === null}
+            >
+              {pendingChoice === 'local' ? (
+                <Spinner />
+              ) : (
+                <HardDrive aria-hidden strokeWidth={1.75} />
+              )}
+              {pendingChoice === 'local' ? 'Setting up…' : 'Or, use this device only'}
+            </Button>
+          </div>
+        </div>
+
+        {action.error !== null ? <InlineAlert tone="error">{action.error}</InlineAlert> : null}
+      </div>
     </div>
   )
 }
 
-function BackLink({
-  onClick,
-  disabled,
-}: {
-  onClick: () => void
-  disabled?: boolean
-}): ReactElement {
+function IcloudUnavailableSection(): ReactElement {
   return (
-    <button
-      type="button"
-      className="text-center text-xs text-text-muted underline disabled:opacity-50"
-      onClick={onClick}
-      disabled={disabled}
-    >
-      Back
-    </button>
+    <section className="flex flex-col gap-3 rounded-lg border border-border bg-surface p-4">
+      <OnboardingIcloudHeader description="Turn on iCloud Drive to keep your notes synced between devices." />
+      <p className="rounded-lg bg-muted/60 px-3 py-2 text-xs leading-5 text-text-muted">
+        Sign in to iCloud on this device, then reopen Reflect.
+      </p>
+    </section>
   )
 }

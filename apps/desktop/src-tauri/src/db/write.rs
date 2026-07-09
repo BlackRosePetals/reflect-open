@@ -21,6 +21,8 @@ pub struct IndexedNote {
     pub(super) id: Option<String>,
     pub(super) title: String,
     pub(super) title_key: String,
+    /// 'daily' | 'note' | 'template' — templates are excluded from note surfaces.
+    pub(super) kind: String,
     pub(super) daily_date: Option<String>,
     pub(super) is_private: bool,
     pub(super) is_pinned: bool,
@@ -42,6 +44,8 @@ pub struct IndexedNote {
     pub(super) links: Vec<IndexedLink>,
     pub(super) tags: Vec<IndexedTag>,
     pub(super) aliases: Vec<IndexedAlias>,
+    /// Emails the note owns via `- Email:` contact-field bullets.
+    pub(super) emails: Vec<IndexedEmail>,
     pub(super) assets: Vec<String>,
     pub(super) tasks: Vec<IndexedTask>,
 }
@@ -71,6 +75,13 @@ pub(super) struct IndexedAlias {
     pub(super) alias_key: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IndexedEmail {
+    pub(super) email: String,
+    pub(super) email_key: String,
+}
+
 /// One GFM checkbox (Plan 18). `marker_offset` is the `[`'s character offset in
 /// the file (UTF-16 units) and, with `note_path`, the row's primary key.
 #[derive(Debug, Deserialize)]
@@ -96,14 +107,15 @@ pub(super) fn apply_note(conn: &Connection, note: &IndexedNote) -> AppResult<()>
     remove_note(conn, &note.path)?;
 
     conn.prepare_cached(
-        "INSERT INTO notes(path, id, title, title_key, daily_date, is_private, is_pinned, pinned_order, has_conflict, gist_url, gist_stale, file_hash, mtime, updated_at, preview)
-         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?13, ?14)",
+        "INSERT INTO notes(path, id, title, title_key, kind, daily_date, is_private, is_pinned, pinned_order, has_conflict, gist_url, gist_stale, file_hash, mtime, updated_at, preview)
+         VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14, ?15)",
     )?
     .execute(params![
         note.path,
         note.id,
         note.title,
         note.title_key,
+        note.kind,
         note.daily_date,
         i64::from(note.is_private),
         i64::from(note.is_pinned),
@@ -147,6 +159,14 @@ pub(super) fn apply_note(conn: &Connection, note: &IndexedNote) -> AppResult<()>
         )?;
         for alias in &note.aliases {
             stmt.execute(params![note.path, alias.alias, alias.alias_key])?;
+        }
+    }
+    {
+        let mut stmt = conn.prepare_cached(
+            "INSERT INTO note_emails(note_path, email, email_key) VALUES(?1, ?2, ?3)",
+        )?;
+        for email in &note.emails {
+            stmt.execute(params![note.path, email.email, email.email_key])?;
         }
     }
     {
@@ -220,6 +240,8 @@ pub(super) fn move_note(conn: &Connection, from: &str, to: &str) -> AppResult<()
         .execute(params![from, to])?;
     conn.prepare_cached("UPDATE aliases SET note_path = ?2 WHERE note_path = ?1")?
         .execute(params![from, to])?;
+    conn.prepare_cached("UPDATE note_emails SET note_path = ?2 WHERE note_path = ?1")?
+        .execute(params![from, to])?;
     conn.prepare_cached("UPDATE assets SET note_path = ?2 WHERE note_path = ?1")?
         .execute(params![from, to])?;
     conn.prepare_cached("UPDATE tasks SET note_path = ?2 WHERE note_path = ?1")?
@@ -239,6 +261,17 @@ pub(super) fn clear_index(conn: &Connection) -> AppResult<()> {
         "DELETE FROM notes; DELETE FROM search_fts;
          DELETE FROM embedding_vectors; DELETE FROM embedding_chunks;",
     )?;
+    Ok(())
+}
+
+/// Re-stamp a note row's stored `mtime` (and `updated_at`, which `apply_note`
+/// keeps equal to it) without touching the projection. The reconcile calls
+/// this when a file's content hash still matches but its listed mtime doesn't
+/// — otherwise the stale stamp costs a re-read on every future pass. A path
+/// with no row matches nothing: a touch must never resurrect a removed note.
+pub(super) fn touch_note(conn: &Connection, path: &str, mtime: i64) -> AppResult<()> {
+    conn.prepare_cached("UPDATE notes SET mtime = ?2, updated_at = ?2 WHERE path = ?1")?
+        .execute(params![path, mtime])?;
     Ok(())
 }
 

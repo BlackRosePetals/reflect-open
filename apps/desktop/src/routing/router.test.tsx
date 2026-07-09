@@ -1,9 +1,9 @@
-import { act, renderHook } from '@testing-library/react'
+import { act, render, renderHook } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import type { ReactNode } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 import { emitNoteMoved } from '@/lib/note-moves'
 import type { Route } from './route'
-import { RouterProvider, useRouter } from './router'
+import { RouterFreeze, RouterProvider, useRouter } from './router'
 
 function routerHook(initialRoute?: Route) {
   return renderHook(() => useRouter(), {
@@ -78,6 +78,20 @@ describe('router', () => {
     expect(result.current.savedScroll()).toBe(40) // the note's own offset
   })
 
+  it('can clear the active entry scroll offset without changing routes', () => {
+    const { result } = routerHook()
+    const entryId = result.current.entryId
+    const arrivals = result.current.arrivalSeq
+    act(() => result.current.saveScrollState(120))
+
+    act(() => result.current.clearScrollState())
+
+    expect(result.current.route).toEqual({ kind: 'today' })
+    expect(result.current.entryId).toBe(entryId)
+    expect(result.current.arrivalSeq).toBe(arrivals)
+    expect(result.current.savedScroll()).toBeNull()
+  })
+
   it('re-navigating to the current route clears its saved scroll (re-anchor intent)', () => {
     const { result } = routerHook()
     const seqBefore = result.current.arrivalSeq
@@ -85,6 +99,85 @@ describe('router', () => {
     act(() => result.current.navigate({ kind: 'today' })) // ⌘D while on today
     expect(result.current.savedScroll()).toBeNull() // re-anchor, don't restore
     expect(result.current.arrivalSeq).toBe(seqBefore + 1) // views are notified
+  })
+
+  it('can restore the daily surface scroll when a tab switch returns to today', () => {
+    const { result } = routerHook()
+    act(() => result.current.saveScrollState(500)) // user scrolled the daily stream
+    act(() => result.current.navigate({ kind: 'note', path: 'notes/a.md' }))
+    act(() => result.current.navigate({ kind: 'today' }, { restoreSurfaceScroll: true }))
+
+    expect(result.current.route).toEqual({ kind: 'today' })
+    expect(result.current.savedScroll()).toBe(500)
+  })
+
+  it('keeps default fresh navigations to daily routes anchor-only', () => {
+    const { result } = routerHook()
+    act(() => result.current.saveScrollState(500))
+    act(() => result.current.navigate({ kind: 'note', path: 'notes/a.md' }))
+    act(() => result.current.navigate({ kind: 'today' }))
+
+    expect(result.current.savedScroll()).toBeNull()
+  })
+
+  it('a surface-scroll return from within the surface re-anchors instead', () => {
+    const { result } = routerHook({ kind: 'daily', date: '2026-06-08' })
+    act(() => result.current.saveScrollState(500)) // scrolled the stream on a dated day
+    act(() => result.current.navigate({ kind: 'today' }, { restoreSurfaceScroll: true }))
+    expect(result.current.savedScroll()).toBeNull() // Daily tab on-stream = ⌘D re-anchor
+
+    act(() => result.current.saveScrollState(300))
+    act(() => result.current.navigate({ kind: 'today' }, { restoreSurfaceScroll: true }))
+    expect(result.current.savedScroll()).toBeNull() // same while already on today
+  })
+
+  it('an explicit re-anchor arrival drops the daily surface offset too', () => {
+    const { result } = routerHook()
+    act(() => result.current.saveScrollState(500)) // user scrolled away on today
+    act(() => result.current.navigate({ kind: 'today' })) // ⌘D re-anchors the stream
+    act(() => result.current.navigate({ kind: 'note', path: 'notes/a.md' }))
+    act(() => result.current.navigate({ kind: 'today' }, { restoreSurfaceScroll: true }))
+
+    expect(result.current.savedScroll()).toBeNull() // the tab can't resurrect pre-⌘D scroll
+  })
+
+  it('clearScrollState drops the daily surface offset too (new-note interaction)', () => {
+    const { result } = routerHook()
+    act(() => result.current.saveScrollState(500)) // scrolled the stream before ⌘N
+    act(() => result.current.clearScrollState()) // note.new discards the stream offsets
+    act(() => result.current.navigate({ kind: 'note', path: 'notes/a.md' }))
+
+    act(() => result.current.back())
+    expect(result.current.savedScroll()).toBeNull() // ⌘[ re-anchors to today
+
+    act(() => result.current.saveScrollState(120)) // post-clear scrolling
+    act(() => result.current.forward())
+    act(() => result.current.navigate({ kind: 'today' }, { restoreSurfaceScroll: true }))
+    expect(result.current.savedScroll()).toBe(120) // the tab restores only the new offset
+  })
+
+  it('carries the focusEditor intent on the arrival that asked for it, one-shot', () => {
+    const { result } = routerHook()
+    expect(result.current.arrivalFocusEditor).toBe(false)
+
+    act(() => result.current.navigate({ kind: 'note', path: 'notes/a.md' }, { focusEditor: true }))
+    expect(result.current.arrivalFocusEditor).toBe(true)
+
+    // The next arrival overwrites the intent — it can never leak onto a
+    // later, unrelated visit (the staleness class a keyed request store had).
+    act(() => result.current.navigate({ kind: 'note', path: 'notes/b.md' }))
+    expect(result.current.arrivalFocusEditor).toBe(false)
+  })
+
+  it('clears the focusEditor intent on history moves', () => {
+    const { result } = routerHook()
+    act(() => result.current.navigate({ kind: 'note', path: 'notes/a.md' }, { focusEditor: true }))
+    act(() => result.current.back())
+    expect(result.current.arrivalFocusEditor).toBe(false)
+
+    act(() => result.current.forward())
+    expect(result.current.route).toEqual({ kind: 'note', path: 'notes/a.md' })
+    expect(result.current.arrivalFocusEditor).toBe(false)
   })
 
   it('entryId is stable per entry and changes across back/forward', () => {
@@ -97,6 +190,55 @@ describe('router', () => {
     expect(result.current.entryId).toBe(todayId)
     act(() => result.current.forward())
     expect(result.current.entryId).toBe(noteId)
+  })
+
+  it('RouterFreeze pins what a background subtree sees until it surfaces', () => {
+    let router: ReturnType<typeof useRouter> | null = null
+    function Capture(): null {
+      router = useRouter()
+      return null
+    }
+    function Probe(): ReactElement {
+      const { route, arrivalSeq } = useRouter()
+      return <div data-testid="frozen-probe">{`${route.kind}:${arrivalSeq}`}</div>
+    }
+    function Harness({ frozen }: { frozen: boolean }): ReactElement {
+      return (
+        <RouterProvider>
+          <Capture />
+          <RouterFreeze frozen={frozen}>
+            <Probe />
+          </RouterFreeze>
+        </RouterProvider>
+      )
+    }
+
+    const view = render(<Harness frozen={false} />)
+    expect(view.getByTestId('frozen-probe').textContent).toBe('today:0')
+
+    // Covered by a pushed note (the mobile stack hides it): navigations must
+    // not reach it — the daily surface would read the arrivalSeq bump as a
+    // re-arrival and re-anchor its scroll while hidden.
+    view.rerender(<Harness frozen={true} />)
+    act(() => router!.navigate({ kind: 'note', path: 'notes/a.md' }))
+    expect(view.getByTestId('frozen-probe').textContent).toBe('today:0')
+
+    // Surfacing again resumes the live value.
+    view.rerender(<Harness frozen={false} />)
+    expect(view.getByTestId('frozen-probe').textContent).toBe('note:1')
+  })
+
+  it('exposes the route back() would land on (the mobile stack peeks it)', () => {
+    const { result } = routerHook()
+    expect(result.current.backRoute).toBeNull()
+    act(() => result.current.navigate({ kind: 'note', path: 'notes/a.md' }))
+    expect(result.current.backRoute).toEqual({ kind: 'today' })
+    act(() => result.current.navigate({ kind: 'note', path: 'notes/b.md' }))
+    expect(result.current.backRoute).toEqual({ kind: 'note', path: 'notes/a.md' })
+    act(() => result.current.back())
+    expect(result.current.backRoute).toEqual({ kind: 'today' })
+    act(() => result.current.back())
+    expect(result.current.backRoute).toBeNull()
   })
 
   it('normalizes a malformed daily date to the today route on navigate', () => {

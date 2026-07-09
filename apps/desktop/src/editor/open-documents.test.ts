@@ -13,6 +13,7 @@ function fakeSession(path: string, log: string[]): NoteSession {
       log.push(`flush:${path}`)
     },
     keepMine: () => {},
+    isDirty: () => false,
     loadTheirs: () => {},
     commitFrontmatter: async () => true,
     content: () => '',
@@ -22,6 +23,7 @@ function fakeSession(path: string, log: string[]): NoteSession {
     commitTaskEdit: async () => false,
     commitTaskRemove: async () => false,
     commitTaskToBullet: async () => false,
+    commitBodyAppend: async () => false,
     dispose: () => {},
     discard: () => {},
   }

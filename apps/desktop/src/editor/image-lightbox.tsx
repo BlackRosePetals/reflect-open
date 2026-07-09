@@ -1,8 +1,11 @@
 import { type ReactElement } from 'react'
-import { ExternalLinkIcon } from 'lucide-react'
+import { ExternalLinkIcon, XIcon } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { LightboxDialog } from '@/editor/lightbox-dialog'
+import { useImageDismissDrag } from '@/editor/use-image-dismiss-drag'
 import { type LightboxTransitionItem } from '@/editor/use-lightbox-transition'
+import { isMobileSurface } from '@/lib/platform-surface'
+import { cn } from '@/lib/utils'
 
 export const IMAGE_LIGHTBOX_TRANSITION_NAME = 'reflect-image-lightbox'
 
@@ -28,6 +31,13 @@ export function ImageLightbox({
   onClose,
   onOpenImage,
 }: ImageLightboxProps): ReactElement | null {
+  const mobileSurface = isMobileSurface()
+  const dismissDrag = useImageDismissDrag({
+    active: image !== null,
+    enabled: mobileSurface,
+    onClose,
+  })
+
   if (image === null) {
     return null
   }
@@ -35,14 +45,37 @@ export function ImageLightbox({
     image.openPath !== null && image.openImage !== null && onOpenImage !== undefined
 
   return (
-    <LightboxDialog open title="Image preview" onClose={onClose}>
+    <LightboxDialog open title="Image preview" immersive={mobileSurface} onClose={onClose}>
+      {mobileSurface ? (
+        <div aria-hidden className="absolute inset-0 bg-black" style={dismissDrag.backdropStyle} />
+      ) : null}
+      {mobileSurface ? (
+        <div
+          className="absolute top-[max(env(safe-area-inset-top),1rem)] left-[max(env(safe-area-inset-left),1rem)] z-10"
+          style={dismissDrag.chromeStyle}
+        >
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-lg"
+            aria-label="Close"
+            className="rounded-full bg-white/15 text-white shadow-sm backdrop-blur-xl hover:bg-white/25 active:bg-white/20"
+            onClick={onClose}
+          >
+            <XIcon />
+          </Button>
+        </div>
+      ) : null}
       {canOpenImage ? (
-        <div className="absolute top-4 right-4 z-10">
+        <div
+          className="absolute top-[max(env(safe-area-inset-top),1rem)] right-[max(env(safe-area-inset-right),1rem)] z-10"
+          style={dismissDrag.chromeStyle}
+        >
           <Button
             type="button"
             variant="ghost"
             size="sm"
-            className="bg-white/70 text-text hover:bg-white"
+            className="h-9 rounded-full bg-white/15 px-3 text-white shadow-sm backdrop-blur-xl hover:bg-white/25 active:bg-white/20"
             onClick={() => onOpenImage(image)}
           >
             <ExternalLinkIcon data-icon="inline-start" />
@@ -53,15 +86,19 @@ export function ImageLightbox({
       <button
         type="button"
         aria-label="Close image preview"
-        className="flex h-full w-full cursor-zoom-out items-center justify-center overflow-hidden bg-transparent p-0"
-        onClick={onClose}
+        className={cn(
+          'absolute inset-0 flex cursor-zoom-out items-center justify-center overflow-hidden bg-transparent',
+          mobileSurface ? 'touch-none p-0' : 'p-6',
+        )}
+        {...dismissDrag.handlers}
       >
         <img
           src={image.src}
           alt={image.alt}
           draggable={false}
-          className="h-full w-full select-none object-contain"
-          style={{ viewTransitionName: image.transitionName }}
+          className="max-h-full max-w-full select-none"
+          onTransitionEnd={dismissDrag.finishSettle}
+          style={{ ...dismissDrag.imageStyle, viewTransitionName: image.transitionName }}
         />
       </button>
     </LightboxDialog>

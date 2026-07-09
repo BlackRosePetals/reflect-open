@@ -1,10 +1,15 @@
-import { cleanup, render, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_SETTINGS, type GraphInfo, type PinnedNote, type Settings } from '@reflect/core'
+import {
+  DEFAULT_SETTINGS,
+  untitledNotePath,
+  type GraphInfo,
+  type PinnedNote,
+  type Settings,
+} from '@reflect/core'
 import type { CommandContext } from '@/lib/commands/types'
-import { untitledNotePath } from '@/lib/create-note'
 import type { Route } from '@/routing/route'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { UpdateProvider } from '@/providers/update-provider'
@@ -14,6 +19,22 @@ const getPinnedNotes = vi.hoisted(() => vi.fn<() => Promise<PinnedNote[]>>(async
 const revealItemInDir = vi.hoisted(() => vi.fn<(path: string) => Promise<void>>(async () => {}))
 const openRecent = vi.hoisted(() => vi.fn())
 const pickAndOpen = vi.hoisted(() => vi.fn())
+const chooseGraph = vi.hoisted(() => vi.fn())
+interface NativeContextMenuItemForTest {
+  text: string
+  action: () => void
+}
+
+interface NativeContextMenuOptionsForTest {
+  items: NativeContextMenuItemForTest[]
+}
+
+const openNativeContextMenu = vi.hoisted(() =>
+  vi.fn(async (options: NativeContextMenuOptionsForTest) => {
+    options.items[0]?.action()
+  }),
+)
+const unpinNote = vi.hoisted(() => vi.fn(async () => {}))
 const updateSettingsWith = vi.hoisted(() =>
   vi.fn<(updater: (current: Settings) => Partial<Settings>) => void>(),
 )
@@ -24,6 +45,11 @@ vi.mock('@reflect/core', async (importOriginal) => ({
   getPinnedNotes,
 }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ revealItemInDir }))
+vi.mock('@/lib/native-menu/context-menu', () => ({ openNativeContextMenu }))
+vi.mock('@/lib/note-pin', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/note-pin')>()),
+  unpinNote,
+}))
 vi.mock('@/providers/graph-provider', () => ({
   useGraph: () => ({
     graph: GRAPH,
@@ -34,6 +60,7 @@ vi.mock('@/providers/graph-provider', () => ({
     indexing: false,
     openRecent,
     pickAndOpen,
+    chooseGraph,
   }),
 }))
 vi.mock('@/providers/settings-provider', () => ({
@@ -71,7 +98,7 @@ vi.mock('@/providers/audio-memo-provider', () => ({
   useAudioMemo: () => audioMemo,
 }))
 
-const GRAPH: GraphInfo = { root: '/notes', name: 'Notes', cloudSync: null, generation: 1 }
+const GRAPH: GraphInfo = { root: '/notes', name: 'Notes', generation: 1 }
 
 // Import after the core mock so the command registry sees the mocked module.
 const { Sidebar } = await import('./sidebar')
@@ -81,10 +108,16 @@ registerAppCommands()
 beforeEach(() => {
   // The hoisted mock is shared module state — restore it so mic-related cases
   // can't inherit mutations from earlier tests.
+  getPinnedNotes.mockReset().mockResolvedValue([])
   audioMemo.available = true
   audioMemo.unavailableReason = null
   audioMemo.toggle.mockReset()
   revealItemInDir.mockClear()
+  openRecent.mockClear()
+  pickAndOpen.mockClear()
+  chooseGraph.mockClear()
+  openNativeContextMenu.mockClear()
+  unpinNote.mockClear()
 })
 
 afterEach(cleanup) // `globals: false` disables testing-library's automatic cleanup
@@ -98,13 +131,17 @@ function renderSidebar(overrides?: Partial<CommandContext>, initialRoute?: Route
     notePath: () => null,
     back: vi.fn(),
     forward: vi.fn(),
+    clearScrollState: vi.fn(),
     toggleTheme: vi.fn(),
     toggleSidebar: vi.fn(),
     newChat: vi.fn(),
+    switchGraph: vi.fn(),
     toggleAudioMemo: vi.fn(),
     generation: () => 1,
     openPalette,
     openShortcuts: vi.fn(),
+    openTemplatePicker: vi.fn(),
+    openTemplateCreate: vi.fn(),
     enableSemanticSearch: vi.fn(),
     ...overrides,
   }
@@ -124,11 +161,19 @@ function renderSidebar(overrides?: Partial<CommandContext>, initialRoute?: Route
 }
 
 describe('Sidebar', () => {
-  it('nav rows run their registered commands', async () => {
+  it('nav rows navigate, with Daily notes restoring its surface scroll', async () => {
     const { view, navigate } = renderSidebar()
 
+    // The Daily row is a capture gesture: it asks for editor focus (the
+    // stream appends at today's end), while a genuine off-surface return
+    // still restores the stream's saved position instead.
     await userEvent.click(view.getByRole('button', { name: /daily notes/i }))
-    await waitFor(() => expect(navigate).toHaveBeenCalledWith({ kind: 'today' }))
+    await waitFor(() =>
+      expect(navigate).toHaveBeenCalledWith(
+        { kind: 'today' },
+        { restoreSurfaceScroll: true, focusEditor: true },
+      ),
+    )
 
     await userEvent.click(view.getByRole('button', { name: /settings/i }))
     await waitFor(() => expect(navigate).toHaveBeenCalledWith({ kind: 'settings' }))
@@ -220,8 +265,36 @@ describe('Sidebar', () => {
 
     const roadmap = await view.findByRole('button', { name: 'Roadmap' })
     expect(pinnedSection.contains(roadmap)).toBe(true)
+    const roadmapPreview = roadmap.firstElementChild
+    expect(roadmapPreview?.getAttribute('class')).toContain('hover:bg-surface-hover')
+    expect(roadmapPreview?.getAttribute('class')).toContain('hover:text-text')
     await userEvent.click(roadmap)
     await waitFor(() => expect(roadmap.getAttribute('aria-current')).toBe('page'))
+  })
+
+  it('renders wiki links in pinned note titles as display text', async () => {
+    getPinnedNotes.mockResolvedValue([
+      { path: 'notes/meeting.md', title: 'Meeting with [[Ada Lovelace|Ada]]', dailyDate: null },
+    ])
+    const { view } = renderSidebar()
+
+    const pinnedSection = await view.findByRole('region', { name: /pinned notes/i })
+    expect(pinnedSection.textContent).toContain('Meeting with Ada')
+    expect(pinnedSection.textContent).not.toContain('[[Ada Lovelace|Ada]]')
+    expect(view.getByRole('button', { name: 'Meeting with Ada' })).toBeTruthy()
+  })
+
+  it('All notes is inactive while the active note is pinned', async () => {
+    getPinnedNotes.mockResolvedValue([
+      { path: 'notes/roadmap.md', title: 'Roadmap', dailyDate: null },
+    ])
+    const { view } = renderSidebar(undefined, { kind: 'note', path: 'notes/roadmap.md' })
+
+    const roadmap = await view.findByRole('button', { name: 'Roadmap' })
+    await waitFor(() => expect(roadmap.getAttribute('aria-current')).toBe('page'))
+    expect(
+      view.getByRole('button', { name: /all notes/i }).getAttribute('aria-current'),
+    ).toBeNull()
   })
 
   it('the pinned section is hidden while nothing is pinned', async () => {
@@ -229,6 +302,40 @@ describe('Sidebar', () => {
     const { view } = renderSidebar()
     await waitFor(() => expect(getPinnedNotes).toHaveBeenCalled())
     expect(view.queryByRole('region', { name: /pinned notes/i })).toBeNull()
+  })
+
+  it('right-click unpins a pinned row through the native context menu', async () => {
+    getPinnedNotes.mockResolvedValue([
+      { path: 'notes/rust.md', title: 'Rust', dailyDate: null },
+    ])
+    const { view } = renderSidebar()
+    const rust = await view.findByRole('button', { name: 'Rust' })
+
+    fireEvent.contextMenu(rust)
+
+    await waitFor(() => expect(openNativeContextMenu).toHaveBeenCalledWith({
+      items: [
+        expect.objectContaining({
+          text: 'Unpin Note',
+        }),
+      ],
+    }))
+    await waitFor(() => expect(view.queryByRole('button', { name: 'Rust' })).toBeNull())
+    expect(unpinNote).toHaveBeenCalledWith('notes/rust.md', 1)
+  })
+
+  it('restores an optimistically removed pinned row when unpin fails', async () => {
+    unpinNote.mockRejectedValueOnce(new Error('disk failed'))
+    getPinnedNotes.mockResolvedValue([
+      { path: 'notes/rust.md', title: 'Rust', dailyDate: null },
+    ])
+    const { view } = renderSidebar()
+    const rust = await view.findByRole('button', { name: 'Rust' })
+
+    fireEvent.contextMenu(rust)
+
+    await waitFor(() => expect(unpinNote).toHaveBeenCalledWith('notes/rust.md', 1))
+    await waitFor(() => expect(view.getByRole('button', { name: 'Rust' })).toBeTruthy())
   })
 
   it('history arrows walk the router stack and disable at its edges', async () => {
@@ -258,12 +365,15 @@ describe('Sidebar', () => {
     const { view } = renderSidebar()
 
     await userEvent.click(view.getByRole('button', { name: /Notes/ }))
-    await userEvent.click(view.getByRole('menuitem', { name: 'Work' }))
+    const work = view.getByRole('menuitem', { name: 'Work' })
+    expect([...work.querySelectorAll('kbd')].map((keycap) => keycap.textContent)).toContain('2')
+    await userEvent.click(work)
     expect(openRecent).toHaveBeenCalledWith('/work')
 
     await userEvent.click(view.getByRole('button', { name: /Notes/ }))
     await userEvent.click(view.getByRole('menuitem', { name: /open another graph/i }))
-    expect(pickAndOpen).toHaveBeenCalled()
+    expect(chooseGraph).toHaveBeenCalled()
+    expect(pickAndOpen).not.toHaveBeenCalled()
   })
 
   it('the graph footer opens user settings from the graph menu', async () => {

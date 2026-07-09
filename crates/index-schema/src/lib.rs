@@ -23,7 +23,7 @@ pub const INDEX_FILE: &str = "index.sqlite";
 /// `user_version` after every migration has run. Read-only consumers compare
 /// this against `PRAGMA user_version` to detect an index written by a newer
 /// (or older) app than they were built for.
-pub const LATEST_SCHEMA_VERSION: usize = 13;
+pub const LATEST_SCHEMA_VERSION: usize = 16;
 
 /// The `index_meta` key holding the TS-owned projection version (the rows'
 /// derivation version, distinct from the schema version above).
@@ -56,6 +56,9 @@ mod schema {
             M::up(include_str!("../migrations/0011_tasks.sql")),
             M::up(include_str!("../migrations/0012_task_due_date.sql")),
             M::up(include_str!("../migrations/0013_perf_indexes.sql")),
+            M::up(include_str!("../migrations/0014_note_kind.sql")),
+            M::up(include_str!("../migrations/0015_note_kind_invariant.sql")),
+            M::up(include_str!("../migrations/0016_note_emails.sql")),
         ])
     });
 
@@ -155,6 +158,11 @@ mod schema {
         let dir = root.join(super::REFLECT_DIR);
         std::fs::create_dir_all(&dir)?;
         let mut conn = Connection::open(dir.join(super::INDEX_FILE))?;
+        // Another PROCESS can hold this database too — a second app flavor on
+        // the same graph, or the `reflect` CLI (which sets its own timeout).
+        // Wait briefly for a cross-process lock to clear instead of failing
+        // writes instantly with SQLITE_BUSY ("database is locked").
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
         migrate(&mut conn)?;
         Ok(conn)

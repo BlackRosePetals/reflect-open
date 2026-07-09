@@ -1,13 +1,20 @@
 import { z } from 'zod'
 import { echoLocalWrite } from '../indexing/local-write-echo'
+import { getBridge, type Unlisten } from '../ipc/bridge'
 import { call } from '../ipc/invoke'
 import {
   fileMetaSchema,
+  graphImportProgressSchema,
+  graphImportSummarySchema,
   graphInfoSchema,
   recentGraphSchema,
+  windowBootstrapSchema,
   type FileMeta,
+  type GraphImportProgress,
+  type GraphImportSummary,
   type GraphInfo,
   type RecentGraph,
+  type WindowBootstrap,
 } from './schemas'
 
 /** Commands that return `()` from Rust serialize as `null` over IPC. */
@@ -18,9 +25,94 @@ export async function openGraph(path: string): Promise<GraphInfo> {
   return call('graph_open', { path }, graphInfoSchema)
 }
 
+/**
+ * Open (or focus) a secondary note window on a `reflect://` route link
+ * (⌘-click a note link). Desktop-only; requires an open graph, which the new
+ * window adopts — see {@link windowBootstrap}.
+ */
+export async function openNoteWindow(deepLink: string): Promise<void> {
+  await call('open_note_window', { deepLink }, voidSchema)
+}
+
+/**
+ * Adopt the already-open graph for a secondary note window: a pure read of
+ * the current graph + index sessions (never `graph_open`/`index_open`, whose
+ * generation bumps would strand the main window's pinned commands) plus the
+ * one-shot deep link the window was created for. Errors when no graph is open.
+ */
+export async function windowBootstrap(): Promise<WindowBootstrap> {
+  return call('window_bootstrap', {}, windowBootstrapSchema)
+}
+
+/**
+ * Close every note window and wait (bounded) for their flushes to land.
+ * Call BEFORE anything that bumps the graph/index generations (switch,
+ * delete): note windows adopted the outgoing session, and a bump-first
+ * ordering would reject their final saves as stale.
+ */
+export async function closeNoteWindows(): Promise<void> {
+  await call('close_note_windows', {}, voidSchema)
+}
+
 /** Create a new graph at `path` and open it. */
 export async function createGraph(path: string): Promise<GraphInfo> {
   return call('graph_create', { path }, graphInfoSchema)
+}
+
+/**
+ * Import a Reflect V1 export `.zip` into the open graph. V1 exports already use
+ * Reflect Open's graph-folder layout; Rust extracts safe entries under the
+ * active graph root without ever replacing an existing file (identical files
+ * skip, conflicting notes rename, conflicting daily notes merge). Attachments
+ * the notes link to on Firebase Storage are downloaded into `assets/` and the
+ * links rewritten, so the call can take a while on attachment-heavy graphs —
+ * observe {@link subscribeImportProgress} and offer
+ * {@link cancelReflectV1Import} while it runs.
+ */
+export async function importReflectV1Zip(
+  path: string,
+  generation: number,
+): Promise<GraphImportSummary> {
+  return call('graph_import_reflect_v1_zip', { path, generation }, graphImportSummarySchema)
+}
+
+/** Event name the running import emits {@link GraphImportProgress} ticks on. */
+export const IMPORT_PROGRESS_EVENT = 'import:progress'
+
+/** Live progress ticks of the running Reflect V1 import. */
+export function subscribeImportProgress(
+  handler: (progress: GraphImportProgress) => void,
+): Promise<Unlisten> {
+  return getBridge().listen(IMPORT_PROGRESS_EVENT, (payload) => {
+    const parsed = graphImportProgressSchema.safeParse(payload)
+    if (parsed.success) {
+      handler(parsed.data)
+    } else {
+      console.error('invalid import:progress payload:', parsed.error)
+    }
+  })
+}
+
+/**
+ * Cancel the running Reflect V1 import (a no-op when none runs). The import
+ * aborts before anything lands in the graph, so cancelling is always safe;
+ * the pending {@link importReflectV1Zip} call rejects.
+ */
+export async function cancelReflectV1Import(): Promise<void> {
+  await call('graph_import_cancel', {}, voidSchema)
+}
+
+/**
+ * Mark files imported by {@link importReflectV1Zip} as this device's writes.
+ * Call only after the UI confirms the imported graph is still the active graph:
+ * these paths are graph-relative and the own-write channel is scoped to the
+ * currently running iCloud controller.
+ */
+export function markReflectV1ImportOwnWrites(summary: GraphImportSummary): void {
+  const modifiedMs = Date.now()
+  for (const changedPath of summary.changedPaths) {
+    echoLocalWrite({ path: changedPath, kind: 'upsert', modifiedMs })
+  }
 }
 
 /**
@@ -36,10 +128,16 @@ export async function readNote(path: string, generation?: number): Promise<strin
  * Atomically write a note's markdown by graph-relative path. `generation` (from
  * `GraphInfo`) pins the write to the graph it was issued for — Rust rejects it
  * if the graph switched in between.
+ *
+ * The echo carries the file's on-disk mtime, which Rust returns from the
+ * write: the index row it produces must compare equal to a later `listFiles`
+ * mtime, or the reconcile's read-free skip never fires and the note is
+ * re-read on every pass. `Date.now()` is a fallback for a platform that
+ * can't report one.
  */
 export async function writeNote(path: string, contents: string, generation: number): Promise<void> {
-  await call('note_write', { path, contents, generation }, voidSchema)
-  echoLocalWrite({ path, kind: 'upsert', modifiedMs: Date.now() })
+  const modifiedMs = await call('note_write', { path, contents, generation }, z.number().nullable())
+  echoLocalWrite({ path, kind: 'upsert', modifiedMs: modifiedMs ?? Date.now() })
 }
 
 /**
@@ -129,9 +227,33 @@ export async function captureInboxRead(name: string, generation: number): Promis
   return call('capture_inbox_read', { name, generation }, z.string())
 }
 
+/**
+ * Spool an envelope this app produced (deep-link text captures) into the
+ * inbox, atomically — it then flows through the same watcher-triggered drain
+ * as browser captures. The caller validates the envelope shape; the Rust side
+ * only moves bytes (with a defensive size cap).
+ */
+export async function captureInboxSpool(
+  name: string,
+  json: string,
+  generation: number,
+): Promise<void> {
+  await call('capture_inbox_spool', { name, json, generation }, voidSchema)
+}
+
 /** Remove a spool file by filename. Idempotent — crash re-drains re-remove. */
 export async function captureInboxRemove(name: string, generation: number): Promise<void> {
   await call('capture_inbox_remove', { name, generation }, voidSchema)
+}
+
+/**
+ * Relay envelopes the iOS share extension spooled into the App Group inbox
+ * into the graph's capture inbox, returning how many moved. iOS-only in
+ * effect (elsewhere there is no shared container and the relay is zero);
+ * called by the mobile capture controller before every drain pass.
+ */
+export async function captureSharedInboxRelay(generation: number): Promise<number> {
+  return call('capture_shared_inbox_relay', { generation }, z.number())
 }
 
 /**
@@ -173,4 +295,13 @@ export async function recentGraphs(): Promise<RecentGraph[]> {
 /** Drop a graph from the recents list (by root path). */
 export async function forgetRecent(root: string): Promise<void> {
   await call('forget_recent', { root }, voidSchema)
+}
+
+/**
+ * Move the open graph's whole directory to the OS trash (recoverable) and
+ * drop it from recents. Pinned to `generation` so a delete can never race a
+ * graph switch and trash the newly opened graph. Desktop-only.
+ */
+export async function deleteGraph(generation: number): Promise<void> {
+  await call('graph_delete', { generation }, voidSchema)
 }

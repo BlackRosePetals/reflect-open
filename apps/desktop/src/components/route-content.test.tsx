@@ -40,8 +40,16 @@ vi.mock('@/editor/note-editor', async () => {
         handleRef?.({
           setMarkdown: () => {},
           getMarkdown: () => '',
+          insertMarkdown: () => {},
           focus: () => editorProbe.focusCalls.push('focus'),
           setSelection: () => {},
+          scrollIntoView: () => {},
+          getSelectedText: () => '',
+          openSelectionMenu: () => {},
+          startPendingReplacement: () => false,
+          appendPendingReplacementText: () => {},
+          acceptPendingReplacement: () => {},
+          discardPendingReplacement: () => {},
         })
         return () => handleRef?.(null)
       }, [handleRef])
@@ -66,14 +74,21 @@ vi.mock('@reflect/core', async (importOriginal) => ({
 }))
 vi.mock('@/providers/graph-provider', () => ({
   useGraph: () => ({
-    graph: { root: '/g', name: 'g', cloudSync: null, generation: 1 },
+    graph: { root: '/g', name: 'g', generation: 1 },
     indexing: false,
   }),
 }))
 vi.mock('@/providers/settings-provider', () => ({
   useSettings: () => ({
-    settings: { editorMarkdownSyntax: 'hide', allNotesFilterTags: ['book', 'link', 'person'] },
+    settings: {
+      editorMarkdownSyntax: 'hide',
+      allNotesFilterTags: ['book', 'link', 'person'],
+      aiProviders: [],
+      defaultAiProviderId: null,
+      aiPrompts: [],
+    },
     updateSettings: async () => {},
+    updateSettingsWith: () => {},
   }),
 }))
 vi.mock('@/components/settings-screen', () => ({
@@ -206,14 +221,17 @@ describe('RouteContent', () => {
   })
 
   it('opens a note the editor cannot round-trip as read-only, never editable', async () => {
-    // Git conflict markers are a known meowdown converter gap (see roundtrip.ts).
+    // Git conflict markers are a known meowdown converter gap (see roundtrip.ts),
+    // and get their own view: both sides shown, labeled by the marker names.
     files['notes/conflict.md'] =
       '# Shared\n\n<<<<<<< this device\nedited on a\n=======\nedited on b\n>>>>>>> other device\n'
     const view = renderRoute({ kind: 'note', path: 'notes/conflict.md' })
 
-    await view.findByText(/read-only to protect your file/)
+    await view.findByText(/edited on a/)
     expect(view.queryByTestId('fake-editor')).toBeNull()
-    expect(view.getByText(/edited on a/)).toBeDefined()
+    expect(view.getByText('this device')).toBeDefined()
+    expect(view.getByText('other device')).toBeDefined()
+    expect(view.getByText(/edited on b/)).toBeDefined()
     view.unmount()
   })
 

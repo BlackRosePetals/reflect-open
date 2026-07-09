@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AiProvidersState } from '../ai/provider-config'
+import type { GenerateAudioMemoTitleRequest } from '../ai/audio-memo-title'
 import {
   audioMemoFromPath,
   audioMemoIdentity,
@@ -20,6 +21,10 @@ import {
 import { transcribeAudio, TranscriptionRejectedError } from '../ai/transcribe'
 import { getSecret } from '../secrets/keychain'
 
+const generateAudioMemoTitleMock = vi.hoisted(() =>
+  vi.fn<(request: GenerateAudioMemoTitleRequest) => Promise<string>>(),
+)
+
 vi.mock('../graph/commands', () => ({
   listDir: vi.fn(),
   listFiles: vi.fn(),
@@ -31,6 +36,10 @@ vi.mock('../graph/commands', () => ({
 vi.mock('../ai/transcribe', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../ai/transcribe')>()),
   transcribeAudio: vi.fn(),
+}))
+vi.mock('../ai/audio-memo-title', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ai/audio-memo-title')>()),
+  generateAudioMemoTitle: generateAudioMemoTitleMock,
 }))
 vi.mock('../secrets/keychain', () => ({
   getSecret: vi.fn(),
@@ -49,6 +58,13 @@ const PROVIDERS: AiProvidersState = {
   providers: [{ id: 'cfg-openai', provider: 'openai', model: 'gpt-5.1', keyHint: 'wxyz1' }],
   defaultProviderId: 'cfg-openai',
 }
+
+const ANTHROPIC_CONFIG = {
+  id: 'cfg-anthropic',
+  provider: 'anthropic',
+  model: 'claude-sonnet-4-6',
+  keyHint: 'wxyz1',
+} as const
 
 /** 2026-06-11 15:30:22.845 local — every derived name is asserted from it. */
 const RECORDED_AT = new Date(2026, 5, 11, 15, 30, 22, 845)
@@ -72,6 +88,7 @@ beforeEach(() => {
   writeNoteMock.mockResolvedValue(undefined)
   getSecretMock.mockResolvedValue('sk-live-key')
   transcribeMock.mockResolvedValue('memo transcript')
+  generateAudioMemoTitleMock.mockResolvedValue('Memo Transcript')
 })
 
 describe('audioMemoIdentity', () => {
@@ -181,15 +198,50 @@ describe('reconcileAudioMemos', () => {
     expect(writeNoteMock.mock.calls).toEqual([
       [
         MEMO.notePath,
-        '---\naliases: [audio-memo-2026-06-11-153022-845]\n---\n\n# Audio memo 2026-06-11 15:30:22\n\n[Recording](audio-memos/audio-memo-2026-06-11-153022-845.webm)\n\nmemo transcript\n',
+        '---\naliases: [audio-memo-2026-06-11-153022-845]\n---\n\n# Memo Transcript\n\n[Recording](audio-memos/audio-memo-2026-06-11-153022-845.webm)\n\nmemo transcript\n',
         3,
       ],
       [
         'daily/2026-06-11.md',
-        'morning thoughts\n\n## Audio memos\n\n[[audio-memo-2026-06-11-153022-845|Audio memo 15:30]]\n',
+        'morning thoughts\n\n## Audio memos\n\n- [[audio-memo-2026-06-11-153022-845|Memo Transcript]]\n',
         3,
       ],
     ])
+    expect(generateAudioMemoTitleMock).toHaveBeenCalledWith({
+      credentials: {
+        config: { ...PROVIDERS.providers[0], model: 'gpt-5.4-nano' },
+        apiKey: 'sk-live-key',
+      },
+      fetchFn: undefined,
+      transcript: 'memo transcript',
+      fallbackTitle: 'Audio memo 2026-06-11 15:30:22',
+    })
+  })
+
+  it('uses the default Anthropic Haiku entry to name a memo when configured', async () => {
+    listDirMock.mockResolvedValue([fileMeta(MEMO.audioPath)])
+    getSecretMock.mockImplementation(async (name) =>
+      name === 'ai-api-key:cfg-anthropic' ? 'sk-ant-live-key' : 'sk-live-key',
+    )
+
+    await reconcile({
+      providers: {
+        providers: [...PROVIDERS.providers, ANTHROPIC_CONFIG],
+        defaultProviderId: ANTHROPIC_CONFIG.id,
+      },
+    })
+
+    expect(getSecretMock).toHaveBeenCalledWith('ai-api-key:cfg-openai')
+    expect(getSecretMock).toHaveBeenCalledWith('ai-api-key:cfg-anthropic')
+    expect(generateAudioMemoTitleMock).toHaveBeenCalledWith({
+      credentials: {
+        config: { ...ANTHROPIC_CONFIG, model: 'claude-haiku-4-5' },
+        apiKey: 'sk-ant-live-key',
+      },
+      fetchFn: undefined,
+      transcript: 'memo transcript',
+      fallbackTitle: 'Audio memo 2026-06-11 15:30:22',
+    })
   })
 
   it('a provider-refused recording is tombstoned with a failure note; the pass continues', async () => {
@@ -244,7 +296,7 @@ describe('reconcileAudioMemos', () => {
 
     expect(writeNoteMock).toHaveBeenCalledWith(
       'daily/2026-06-11.md',
-      '## Audio memos\n\n[[audio-memo-2026-06-11-153022-845|Audio memo 15:30]]\n',
+      '## Audio memos\n\n- [[audio-memo-2026-06-11-153022-845|Memo Transcript]]\n',
       3,
     )
   })
@@ -347,7 +399,27 @@ describe('reconcileAudioMemos', () => {
     )
     expect(writeNoteMock).toHaveBeenCalledWith(
       'daily/2026-06-11.md',
-      expect.stringContaining('[[audio-memo-2026-06-11-153022-845|Audio memo 15:30]]'),
+      expect.stringContaining('- [[audio-memo-2026-06-11-153022-845|Memo Transcript]]'),
+      3,
+    )
+  })
+
+  it('uses the timestamp fallback name for silence', async () => {
+    listDirMock.mockResolvedValue([fileMeta(MEMO.audioPath)])
+    transcribeMock.mockResolvedValue('')
+
+    const outcome = await reconcile()
+
+    expect(outcome).toEqual({ pending: 1, transcribed: 1, rejected: 0, stopped: null })
+    expect(generateAudioMemoTitleMock).not.toHaveBeenCalled()
+    expect(writeNoteMock).toHaveBeenCalledWith(
+      MEMO.notePath,
+      expect.stringContaining('# Audio memo 2026-06-11 15:30:22'),
+      3,
+    )
+    expect(writeNoteMock).toHaveBeenCalledWith(
+      'daily/2026-06-11.md',
+      expect.stringContaining('- [[audio-memo-2026-06-11-153022-845|Audio memo 2026-06-11 15:30:22]]'),
       3,
     )
   })

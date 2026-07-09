@@ -1,6 +1,9 @@
 import { readNote } from '../graph/commands'
+import { isTemplatePath } from '../graph/paths'
+import { gatherAssetDescriptionBodies } from '../indexing/asset-description-text'
 import { db } from '../indexing/db'
-import { chunkNote } from './chunk'
+import { parseNote } from '../markdown'
+import { chunkAssetDescriptions, chunkNote } from './chunk'
 import { embedApply, embedRemove, embedTexts, type EmbedChunkPayload } from './commands'
 
 /**
@@ -8,6 +11,11 @@ import { embedApply, embedRemove, embedTexts, type EmbedChunkPayload } from './c
  * against the stored rows, embed only what changed, and apply as one
  * generation-pinned write. TS owns this orchestration (Rust supplies
  * `embed_texts` + the table writes), mirroring the indexing pipeline.
+ *
+ * A note's chunk set also carries its referenced assets' description bodies
+ * (Plan 20 → semantic leg), mirroring the FTS fold — so a meaning-level query
+ * about an image or PDF's contents surfaces the referencing note on the
+ * semantic side of hybrid retrieval, not just on keyword matches.
  */
 
 export interface EmbedNoteOptions {
@@ -25,6 +33,9 @@ export interface EmbedNoteOptions {
  */
 export async function embedNote(options: EmbedNoteOptions): Promise<number> {
   const { path, generation, modelId } = options
+  if (isTemplatePath(path)) {
+    return 0 // templates are boilerplate — never embedded, never retrieved
+  }
   let content = options.content
   if (content === undefined) {
     try {
@@ -34,7 +45,12 @@ export async function embedNote(options: EmbedNoteOptions): Promise<number> {
     }
   }
 
-  const chunks = await chunkNote(path, content)
+  const parsed = parseNote({ path, source: content })
+  const assetBodies = await gatherAssetDescriptionBodies(parsed.assets.map((asset) => asset.path))
+  const chunks = [
+    ...(await chunkNote(path, content, parsed)),
+    ...(await chunkAssetDescriptions(assetBodies, content.length + 1)),
+  ]
   if (chunks.length === 0) {
     await embedRemove(path, generation)
     return 0
@@ -96,7 +112,12 @@ export async function backfillEmbeddings(options: {
   isStale?: () => boolean
 }): Promise<'completed' | 'aborted'> {
   const { generation, modelId, onProgress, isStale } = options
-  const rows = await db.selectFrom('notes').select('path').orderBy('path').execute()
+  const rows = await db
+    .selectFrom('notes')
+    .where('kind', '!=', 'template')
+    .select('path')
+    .orderBy('path')
+    .execute()
   let done = 0
   for (const row of rows) {
     if (isStale?.()) {

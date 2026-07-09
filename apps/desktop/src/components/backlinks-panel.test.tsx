@@ -15,12 +15,16 @@ vi.mock('@reflect/core', async (importOriginal) => ({
   resolveWikiTarget,
 }))
 vi.mock('@/providers/graph-provider', () => ({
-  useGraph: () => ({ graph: { root: '/g', name: 'g', cloudSync: false, generation: 1 } }),
+  useGraph: () => ({ graph: { root: '/g', name: 'g', generation: 1 } }),
 }))
 
 function RouteProbe(): ReactNode {
-  const { route } = useRouter()
-  return <output data-testid="route">{JSON.stringify(route)}</output>
+  const { route, arrivalFocusEditor } = useRouter()
+  return (
+    <output data-testid="route" data-focus={String(arrivalFocusEditor)}>
+      {JSON.stringify(route)}
+    </output>
+  )
 }
 
 function renderPanel(path: string) {
@@ -65,6 +69,7 @@ describe('BacklinksPanel', () => {
         sourceTitle: 'Meeting Notes',
         snippet: 'discussed [[Roadmap]] follow-ups',
         posFrom: 12,
+        tasks: [],
       },
     ])
     const view = renderPanel('notes/roadmap.md')
@@ -79,6 +84,7 @@ describe('BacklinksPanel', () => {
         sourceTitle: 'Meeting Notes',
         snippet: 'discussed [[Roadmap]] follow-ups',
         posFrom: 12,
+        tasks: [],
       },
     ])
     resolveWikiTarget.mockResolvedValue({ kind: 'resolved', ref: 'notes/roadmap.md' })
@@ -103,18 +109,21 @@ describe('BacklinksPanel', () => {
         sourceTitle: 'Meeting Notes',
         snippet: 'discussed [[Roadmap]] follow-ups',
         posFrom: 12,
+        tasks: [],
       },
       {
         sourcePath: 'notes/meeting.md',
         sourceTitle: 'Meeting Notes',
         snippet: 'revisit [[Roadmap]] next week',
         posFrom: 80,
+        tasks: [],
       },
       {
         sourcePath: 'notes/planning.md',
         sourceTitle: 'Planning',
         snippet: 'ship the [[Roadmap]]',
         posFrom: 3,
+        tasks: [],
       },
     ])
     const view = renderPanel('notes/roadmap.md')
@@ -130,6 +139,9 @@ describe('BacklinksPanel', () => {
 
     await userEvent.click(view.getByText('Meeting Notes'))
     expect(view.getByTestId('route').textContent).toContain('notes/meeting.md')
+    // A backlink tap must not request focus — on mobile that would raise the
+    // keyboard mid-arrival; desktop autofocuses note arrivals on its own.
+    expect(view.getByTestId('route').getAttribute('data-focus')).toBe('false')
     view.unmount()
   })
 
@@ -140,6 +152,7 @@ describe('BacklinksPanel', () => {
         sourceTitle: 'Meeting Notes',
         snippet: 'discussed [[Roadmap]] follow-ups',
         posFrom: 12,
+        tasks: [],
       },
     ])
     const view = renderPanel('notes/roadmap.md')
@@ -168,6 +181,7 @@ describe('BacklinksPanel', () => {
         sourceTitle: 'Shared Source',
         snippet: 'links [[A]] and [[B]]',
         posFrom: 5,
+        tasks: [],
       },
     ])
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -198,6 +212,7 @@ describe('BacklinksPanel', () => {
         sourceTitle: 'Meeting Notes',
         snippet: 'discussed [[Roadmap]] follow-ups',
         posFrom: 12,
+        tasks: [],
       },
     ])
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -229,12 +244,14 @@ describe('BacklinksPanel', () => {
         sourceTitle: 'Meeting Notes',
         snippet: 'discussed [[Roadmap]] follow-ups',
         posFrom: 12,
+        tasks: [],
       },
       {
         sourcePath: 'notes/planning.md',
         sourceTitle: 'Planning',
         snippet: 'ship the [[Roadmap]]',
         posFrom: 3,
+        tasks: [],
       },
     ])
     const view = renderPanel('notes/roadmap.md')
@@ -262,12 +279,14 @@ describe('BacklinksPanel', () => {
         sourceTitle: 'Meeting Notes',
         snippet: 'discussed [[Roadmap]] follow-ups',
         posFrom: 12,
+        tasks: [],
       },
       {
         sourcePath: 'notes/planning.md',
         sourceTitle: 'Planning',
         snippet: 'ship the [[Roadmap]]',
         posFrom: 3,
+        tasks: [],
       },
     ])
     const view = renderPanel('notes/roadmap.md')

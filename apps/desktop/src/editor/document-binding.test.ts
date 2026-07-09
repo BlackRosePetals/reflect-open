@@ -28,6 +28,7 @@ function fakeSession(path: string) {
     externalChanged: () => {},
     flush,
     keepMine: () => {},
+    isDirty: () => false,
     loadTheirs: () => {},
     commitFrontmatter: async () => true,
     content: () => '',
@@ -37,6 +38,7 @@ function fakeSession(path: string) {
     commitTaskEdit: async () => false,
     commitTaskRemove: async () => false,
     commitTaskToBullet: async () => false,
+    commitBodyAppend: async () => false,
     dispose,
     discard,
   }

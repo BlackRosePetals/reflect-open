@@ -6,6 +6,7 @@ import { setBridge } from '@reflect/core'
 import { resetOperations, useOperations } from '@/lib/operations'
 import { INDEX_QUERY_SCOPE } from '@/lib/query-client'
 import { RouterProvider, useRouter } from '@/routing/router'
+import { installVirtuaTestEnv } from '@/test-utils/virtua-jsdom'
 import { AllNotesScreen } from './all-notes-screen'
 
 /**
@@ -14,9 +15,13 @@ import { AllNotesScreen } from './all-notes-screen'
  * query, and navigation through the real router.
  */
 
+const settingsState = vi.hoisted((): { dateFormat: 'mdy' | 'dmy' | 'iso' } => ({
+  dateFormat: 'mdy',
+}))
+
 vi.mock('@/providers/graph-provider', () => ({
   useGraph: () => ({
-    graph: { root: '/g', name: 'g', cloudSync: null, generation: 1 },
+    graph: { root: '/g', name: 'g', generation: 1 },
     indexing: false,
   }),
 }))
@@ -26,44 +31,20 @@ vi.mock('@/providers/settings-provider', () => ({
       editorMarkdownSyntax: 'hide',
       theme: 'system',
       timeFormat: '12h',
-      dateFormat: 'mdy',
+      dateFormat: settingsState.dateFormat,
       allNotesFilterTags: ['book', 'person'],
     },
     updateSettings: () => {},
   }),
 }))
 
-// jsdom implements none of these, and measures every element as 0×0 — the
-// virtualized table needs a viewport with height to window rows into. The
-// virtualizer reads `offsetWidth`/`offsetHeight` for the scroll rect and
-// `getBoundingClientRect` for row measurement.
-class ResizeObserverStub {
-  observe(): void {}
-  unobserve(): void {}
-  disconnect(): void {}
-}
-globalThis.ResizeObserver ??= ResizeObserverStub as unknown as typeof ResizeObserver
+// jsdom computes no layout, so virtua can't measure its viewport or rows.
+// installVirtuaTestEnv supplies those: the scroll container reports a tall
+// viewport and each row (an <li>) the estimated row height, so even a 1000-row
+// list windows down to a handful of mounted rows.
+installVirtuaTestEnv((element) => (element.tagName === 'LI' ? 48 : 768))
 Element.prototype.scrollTo ??= () => {}
 Element.prototype.scrollIntoView ??= () => {} // cmdk scrolls the selected item
-Object.defineProperty(HTMLElement.prototype, 'offsetWidth', {
-  configurable: true,
-  get: () => 1024,
-})
-Object.defineProperty(HTMLElement.prototype, 'offsetHeight', {
-  configurable: true,
-  get: () => 768,
-})
-Element.prototype.getBoundingClientRect = () => ({
-  width: 1024,
-  height: 768,
-  top: 0,
-  left: 0,
-  right: 1024,
-  bottom: 768,
-  x: 0,
-  y: 0,
-  toJSON: () => ({}),
-})
 
 // Deterministic regardless of the test run's clock: both timestamps are far in
 // the past, so the Updated column always renders the short-date form.
@@ -99,6 +80,7 @@ setBridge({ invoke: mockInvoke, listen: async () => () => {} })
 
 beforeEach(() => {
   resetOperations()
+  settingsState.dateFormat = 'mdy'
   mockInvoke.mockReset()
   mockInvoke.mockImplementation(async (command, args) => {
     if (command !== 'db_query') {
@@ -188,6 +170,18 @@ describe('AllNotesScreen', () => {
     view.unmount()
   })
 
+  it('keeps ISO updated dates on one line', async () => {
+    settingsState.dateFormat = 'iso'
+    const view = renderScreen()
+
+    const updated = await view.findByText('2020-01-15')
+    expect(updated.className).toContain('whitespace-nowrap')
+    expect(updated.parentElement?.className ?? '').toContain(
+      'grid-cols-[minmax(0,15rem)_minmax(0,1fr)_minmax(0,8rem)_6rem]',
+    )
+    view.unmount()
+  })
+
   it('renders a dash, not an epoch date, for a row missing its mtime', async () => {
     mockInvoke.mockImplementation(async (command, args) => {
       if (command !== 'db_query') {
@@ -247,12 +241,12 @@ describe('AllNotesScreen', () => {
     view.unmount()
   })
 
-  it('renders rows from a warm cache without waiting for a refetch', () => {
+  it('renders rows from a warm cache without a refetch', async () => {
     // The app client uses staleTime: Infinity, so returning to All Notes with
     // fresh cached data commits exactly one render — no fetch, no follow-up.
-    // The virtualizer must acquire the scroll container on that lone render
-    // (regression: it read a parent ref that attaches after its layout
-    // effect, leaving the list blank until something else re-rendered).
+    // virtua windows against its parent (the scroll container) and measures it a
+    // microtask later, so the rows arrive a tick after that lone render. The
+    // regression guarded here is a permanently blank list, not the tick.
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, staleTime: Infinity } },
     })
@@ -279,8 +273,7 @@ describe('AllNotesScreen', () => {
 
     const view = renderScreen(client)
 
-    // Deliberately synchronous: the rows must be in the first committed frame.
-    expect(view.getByText('Health Stacked')).toBeDefined()
+    expect(await view.findByText('Health Stacked')).toBeDefined()
     expect(view.getByText('Tokyo Gâteau')).toBeDefined()
     view.unmount()
   })
@@ -306,9 +299,9 @@ describe('AllNotesScreen', () => {
     const view = renderScreen()
 
     await view.findByText('Note 0')
-    const rendered = view.container.querySelectorAll('li[data-index]')
+    const rendered = view.getByTestId('all-notes-scroll').querySelectorAll('li')
     expect(rendered.length).toBeGreaterThan(0)
-    // The list is uncapped, but only the scroll window (plus overscan) mounts.
+    // The list is uncapped, but only the scroll window (plus buffer) mounts.
     expect(rendered.length).toBeLessThan(100)
     view.unmount()
   })

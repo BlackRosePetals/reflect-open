@@ -85,12 +85,12 @@ export const timeFormatSchema = z.enum(['12h', '24h']).catch('12h')
 export type TimeFormat = z.infer<typeof timeFormatSchema>
 
 /**
- * How calendar dates are ordered when displayed throughout the app:
- * `mdy` (the default) renders `June 10th, 2026`; `dmy` renders
- * `10th June 2026`. Display-only — daily-note filenames and stored dates
+ * How calendar dates are displayed throughout the app: `mdy` (the default)
+ * renders `June 10th, 2026`, `dmy` renders `10th June 2026`, and `iso`
+ * renders `2026-06-10`. Display-only — daily-note filenames and stored dates
  * stay ISO `YYYY-MM-DD` regardless.
  */
-export const dateFormatSchema = z.enum(['mdy', 'dmy']).catch('mdy')
+export const dateFormatSchema = z.enum(['mdy', 'dmy', 'iso']).catch('mdy')
 
 export type DateFormat = z.infer<typeof dateFormatSchema>
 
@@ -132,13 +132,60 @@ export const describeAssetsSchema = z.boolean().catch(true)
 
 /**
  * Whether the user has finished the mobile onboarding choice (Plan 19, step
- * 6): "Start fresh" or "Connect to GitHub". Off by default — a fresh install
- * shows the onboarding screen, which (for the GitHub path) clones into the
- * still-empty graph root before anything seeds it. Once set, later launches
- * open the fixed root directly. Mobile-only; desktop has its own chooser, so
- * this key is simply never read there.
+ * 6): iCloud Drive or this device. Off by default — a fresh install shows
+ * the onboarding screen before anything seeds a graph. Once set, later
+ * launches open the chosen storage root directly. Mobile-only; desktop has
+ * its own chooser, so this key is simply never read there.
  */
 export const mobileOnboardedSchema = z.boolean().catch(false)
+
+/**
+ * Which storage root the mobile graph lives in (Plan 21): the app's iCloud
+ * Drive container (`'icloud'` — the recommended default offered first during
+ * onboarding, syncs across devices) or the app-sandbox Documents directory
+ * (`'local'` — this device only, and the home of GitHub-cloned graphs).
+ * Defaults to `'local'` so installs onboarded before this key existed keep
+ * opening the root they already use. Only the *kind* is persisted — absolute
+ * container paths change across restore/update and are re-derived every
+ * launch. Mobile-only; desktop never reads it.
+ */
+export const mobileStorageKindSchema = z.enum(['icloud', 'local']).catch('local')
+
+/**
+ * The *name* of the iCloud graph the mobile app has open (the container
+ * `Documents/` subdirectory name) — the persisted selector now that the
+ * container can hold several graphs. A name, never a path: container paths
+ * change across restore/update and are re-derived every launch. Empty means
+ * "not chosen yet" — launch falls back to the first graph in the container.
+ * Only read when `mobileStorage` is `'icloud'`. Mobile-only.
+ */
+export const mobileGraphNameSchema = z.string().catch('')
+
+/**
+ * Whether the Apple Contacts integration is on. Off by default — turning it
+ * on triggers the OS contacts permission prompt. Lookups are live, on-demand
+ * `CNContactStore` queries (attendee resolution, suggested-contact cards);
+ * nothing is mirrored into the index and nothing ever leaves the device.
+ */
+export const contactsEnabledSchema = z.boolean().catch(false)
+
+/**
+ * Whether the Apple Calendar integration is on. Off by default — turning it
+ * on triggers the macOS calendar-permission prompt, and that is the user's
+ * call. Access is read-only and entirely local (EventKit); see
+ * docs/porting/calendar-meetings-integration.md.
+ */
+export const calendarEnabledSchema = z.boolean().catch(false)
+
+/**
+ * EventKit identifiers of the calendars whose events appear beside the daily
+ * note. Empty (the default) shows nothing — the Settings section lists every
+ * calendar on the Mac for opt-in. Identifiers for since-removed accounts are
+ * harmless: the Rust side skips ones it can't resolve.
+ */
+export const calendarIdsSchema = z.array(z.string()).catch([])
+
+export type CalendarIds = z.infer<typeof calendarIdsSchema>
 
 /**
  * The preset palette for a graph's identity color (the swatch shown next to
@@ -189,7 +236,7 @@ export const graphColorsSchema = z
  * The cloud AI providers Reflect can call directly (BYOK — the user's own
  * keys, no Reflect-hosted proxy).
  */
-export const aiProviderIdSchema = z.enum(['openai', 'anthropic', 'google'])
+export const aiProviderIdSchema = z.enum(['openai', 'anthropic', 'google', 'openrouter'])
 
 export type AiProviderId = z.infer<typeof aiProviderIdSchema>
 
@@ -253,6 +300,47 @@ export const aiProvidersSchema = z
     }),
   )
 
+/**
+ * Where an AI selection prompt's accepted result lands: `replace` swaps the
+ * selection for the result; `append` inserts the result after the selection's
+ * block (e.g. "Continue writing"). An invalid value degrades to `replace`.
+ */
+export const aiPromptModeSchema = z.enum(['replace', 'append']).catch('replace')
+
+export type AiPromptMode = z.infer<typeof aiPromptModeSchema>
+
+/**
+ * One saved AI selection prompt: a label for the picker and a body sent to
+ * the provider. The body may reference the selection with the
+ * `{{selectedText}}` placeholder (old Reflect's syntax, so saved v1 prompts
+ * port over verbatim); a body without the placeholder gets the selection
+ * appended after it.
+ */
+export const aiPromptSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  body: z.string().min(1),
+  mode: aiPromptModeSchema,
+})
+
+export type AiPrompt = z.infer<typeof aiPromptSchema>
+
+/**
+ * The user's saved AI selection prompts, shown in the editor's AI menu after
+ * the built-in set. Global across graphs — prompts are workflow, not note
+ * content. Resilience is per entry: a corrupt entry is dropped while the rest
+ * load, and a non-array value degrades to the empty list.
+ */
+export const aiPromptsSchema = z
+  .array(z.unknown())
+  .catch([])
+  .transform((entries) =>
+    entries.flatMap((entry) => {
+      const parsed = aiPromptSchema.safeParse(entry)
+      return parsed.success ? [parsed.data] : []
+    }),
+  )
+
 export const settingsSchema = z
   .looseObject({
     editorMarkdownSyntax: editorMarkdownSyntaxSchema,
@@ -262,16 +350,22 @@ export const settingsSchema = z
     editorTextSize: editorTextSizeSchema,
     semanticSearchEnabled: semanticSearchEnabledSchema,
     describeAssets: describeAssetsSchema,
+    contactsEnabled: contactsEnabledSchema,
     mobileOnboarded: mobileOnboardedSchema,
+    mobileStorage: mobileStorageKindSchema,
+    mobileGraphName: mobileGraphNameSchema,
     theme: themePreferenceSchema,
     timeFormat: timeFormatSchema,
     dateFormat: dateFormatSchema,
     weekStartDay: weekStartDaySchema,
     allNotesFilterTags: allNotesFilterTagsSchema,
+    calendarEnabled: calendarEnabledSchema,
+    calendarIds: calendarIdsSchema,
     graphColors: graphColorsSchema,
     aiProviders: aiProvidersSchema,
     defaultAiProviderId: defaultAiProviderIdSchema,
     chatModelSelection: chatModelSelectionSchema,
+    aiPrompts: aiPromptsSchema,
   })
 
 export type Settings = z.infer<typeof settingsSchema>

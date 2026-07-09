@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { setBridge } from '../ipc/bridge'
 import {
   dailyDatesInRange,
+  getBacklinksWithContext,
   getDuplicateNoteIds,
   getNoteIdsByPath,
+  getOpenTasks,
   getPinnedNotes,
   listDailyNotes,
+  noteTitleOwningEmail,
   suggestWikiTargets,
 } from './queries'
 
@@ -44,6 +47,34 @@ describe('dailyDatesInRange', () => {
   it('returns an empty list when no daily notes exist in the range', async () => {
     mockInvoke.mockResolvedValue([])
     await expect(dailyDatesInRange('2025-01-01', '2025-01-31')).resolves.toEqual([])
+  })
+})
+
+describe('noteTitleOwningEmail', () => {
+  it('joins note_emails to #person-tagged regular notes by folded key, first path wins', async () => {
+    mockInvoke.mockResolvedValue([{ title: 'Jane Doe' }])
+
+    await expect(noteTitleOwningEmail('  Jane@Corp.com ')).resolves.toBe('Jane Doe')
+
+    const [command, args] = mockInvoke.mock.calls[0]!
+    expect(command).toBe('db_query')
+    const sql = String(args['sql'])
+    expect(sql).toContain('note_emails')
+    expect(sql).toContain('email_key')
+    expect(sql).toContain('tag_key')
+    expect(sql).toContain('kind')
+    expect(sql).toContain('order by')
+    expect(args['params']).toEqual(['jane@corp.com', 'person', 'note'])
+  })
+
+  it('answers null for an unowned address without guessing', async () => {
+    mockInvoke.mockResolvedValue([])
+    await expect(noteTitleOwningEmail('nobody@corp.com')).resolves.toBeNull()
+  })
+
+  it('short-circuits a blank address before touching the bridge', async () => {
+    await expect(noteTitleOwningEmail('   ')).resolves.toBeNull()
+    expect(mockInvoke).not.toHaveBeenCalled()
   })
 })
 
@@ -91,18 +122,128 @@ describe('listDailyNotes', () => {
   })
 })
 
+describe('getBacklinksWithContext', () => {
+  it('orders sources most recent first — daily date for dailies, edit time otherwise (V1 parity)', async () => {
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'db_query') {
+        return [
+          { source_path: 'daily/2026-07-01.md', pos_from: 4, source_title: '2026-07-01' },
+          { source_path: 'notes/older.md', pos_from: 9, source_title: 'Older' },
+        ]
+      }
+      return 'a line with a [[target]] link'
+    })
+
+    const rows = await getBacklinksWithContext('notes/target.md')
+
+    expect(rows.map((row) => row.sourcePath)).toEqual([
+      'daily/2026-07-01.md',
+      'notes/older.md',
+    ])
+    const [command, args] = mockInvoke.mock.calls[0]!
+    expect(command).toBe('db_query')
+    const sql = String(args['sql'])
+    // Recency interleaves dailies (calendar date) with regular notes (edit
+    // time); title must not be the sort key.
+    expect(sql).toContain(
+      'order by coalesce(strftime(\'%s\', "notes"."daily_date") * 1000, "notes"."updated_at") desc',
+    )
+    expect(sql).not.toContain('order by "notes"."title"')
+    // Groups stay contiguous and links keep document order.
+    expect(sql).toContain('"backlinks"."source_path"')
+    expect(sql).toContain('"backlinks"."pos_from"')
+  })
+
+  it('extracts the block context around the link — a list item keeps its children', async () => {
+    const content = '- kickoff with [[target]]\n  - prep the agenda\n- unrelated\n'
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'db_query') {
+        return [
+          {
+            source_path: 'notes/source.md',
+            pos_from: content.indexOf('[[target]]'),
+            source_title: 'Source',
+          },
+        ]
+      }
+      return content
+    })
+
+    const rows = await getBacklinksWithContext('notes/target.md')
+
+    expect(rows.map((row) => row.snippet)).toEqual([
+      '- kickoff with [[target]]\n  - prep the agenda',
+    ])
+  })
+
+  it('co-groups sibling branches through the target aliases, not just the clicked spelling', async () => {
+    const content = '- parent line\n  - one [[Project X]]\n  - two [[projx]]\n'
+    mockInvoke.mockImplementation(async (command, args) => {
+      if (command !== 'db_query') {
+        return content
+      }
+      const sql = String(args['sql'])
+      if (sql.includes('note_keys')) {
+        return [{ key: 'project x' }, { key: 'projx' }]
+      }
+      return [
+        {
+          source_path: 'notes/source.md',
+          pos_from: content.indexOf('[[Project X]]'),
+          source_title: 'Source',
+        },
+      ]
+    })
+
+    const rows = await getBacklinksWithContext('notes/target.md')
+
+    expect(rows.map((row) => row.snippet)).toEqual([
+      '- parent line\n  - one [[Project X]]\n  - two [[projx]]',
+    ])
+  })
+
+  it('collapses mentions with an identical context into one row (V1 parity)', async () => {
+    const content = 'both [[target]] links on one [[target]] line\n\nanother [[target]] mention\n'
+    mockInvoke.mockImplementation(async (command) => {
+      if (command === 'db_query') {
+        return [
+          { source_path: 'notes/source.md', pos_from: 5, source_title: 'Source' },
+          {
+            source_path: 'notes/source.md',
+            pos_from: content.lastIndexOf('[[target]] line'),
+            source_title: 'Source',
+          },
+          {
+            source_path: 'notes/source.md',
+            pos_from: content.indexOf('another'),
+            source_title: 'Source',
+          },
+        ]
+      }
+      return content
+    })
+
+    const rows = await getBacklinksWithContext('notes/target.md')
+
+    expect(rows.map((row) => row.snippet)).toEqual([
+      'both [[target]] links on one [[target]] line',
+      'another [[target]] mention',
+    ])
+  })
+})
+
 describe('getPinnedNotes', () => {
   it('selects pinned rows: explicit orders first, then folded title', async () => {
     mockInvoke.mockResolvedValue([
-      { path: 'notes/a.md', title: 'Alpha', daily_date: null },
-      { path: 'notes/b.md', title: 'Beta', daily_date: null },
+      { path: 'notes/a.md', title: 'Alpha', daily_date: null, pinned_order: 0 },
+      { path: 'notes/b.md', title: 'Beta', daily_date: null, pinned_order: null },
     ])
 
     const pinned = await getPinnedNotes()
 
     expect(pinned).toEqual([
-      { path: 'notes/a.md', title: 'Alpha', dailyDate: null },
-      { path: 'notes/b.md', title: 'Beta', dailyDate: null },
+      { path: 'notes/a.md', title: 'Alpha', dailyDate: null, pinnedOrder: 0 },
+      { path: 'notes/b.md', title: 'Beta', dailyDate: null, pinnedOrder: null },
     ])
     const [command, args] = mockInvoke.mock.calls[0]!
     expect(command).toBe('db_query')
@@ -112,7 +253,9 @@ describe('getPinnedNotes', () => {
     expect(sql).toContain('order by pinned_order IS NULL')
     expect(sql).toContain('"pinned_order"')
     expect(sql).toContain('title_key')
-    expect(args['params']).toEqual([1])
+    // A pinned template must not reach the sidebar's Pinned section.
+    expect(sql).toContain('"kind" != ?')
+    expect(args['params']).toEqual([1, 'template'])
   })
 })
 
@@ -218,5 +361,29 @@ describe('suggestWikiTargets', () => {
     await expect(suggestWikiTargets('2020-01-01')).resolves.toEqual([
       { target: '2020-01-01', path: null, title: '2020-01-01', alias: null, date: '2020-01-01' },
     ])
+  })
+
+  it('excludes templates from both the title and alias candidate queries', async () => {
+    mockInvoke.mockResolvedValue([])
+
+    await suggestWikiTargets('journal')
+
+    expect(mockInvoke).toHaveBeenCalledTimes(2)
+    for (const [, args] of mockInvoke.mock.calls) {
+      expect(String(args['sql'])).toContain('"kind" != ?')
+      expect(args['params']).toContain('template')
+    }
+  })
+})
+
+describe('getOpenTasks', () => {
+  it('never surfaces template checkboxes — boilerplate, not real tasks', async () => {
+    mockInvoke.mockResolvedValue([])
+
+    await getOpenTasks()
+
+    const [, args] = mockInvoke.mock.calls[0]!
+    expect(String(args['sql'])).toContain('"notes"."kind" != ?')
+    expect(args['params']).toContain('template')
   })
 })

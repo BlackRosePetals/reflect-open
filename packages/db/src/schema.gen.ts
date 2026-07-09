@@ -74,6 +74,12 @@ export interface Links {
   targetRaw: string;
 }
 
+export interface NoteEmails {
+  email: string;
+  emailKey: string;
+  notePath: string;
+}
+
 export interface NoteKeys {
   key: string | null;
   notePath: string | null;
@@ -88,6 +94,7 @@ export interface Notes {
   id: string | null;
   isPinned: Generated<number>;
   isPrivate: Generated<number>;
+  kind: Generated<string>;
   mtime: Generated<number>;
   path: string;
   pinnedOrder: number | null;
@@ -132,6 +139,7 @@ export interface DB {
   embeddingChunks: EmbeddingChunks;
   indexMeta: IndexMeta;
   links: Links;
+  noteEmails: NoteEmails;
   noteKeys: NoteKeys;
   notes: Notes;
   noteText: NoteText;

@@ -3,6 +3,7 @@ import { confirmQuit, hasBridge, subscribeQuitRequested } from '@reflect/core'
 import { flushOpenDocuments } from '@/editor/open-documents'
 import { flushBackup } from '@/lib/backup-flush'
 import { flushSettings } from '@/lib/settings-flush'
+import { trackSubscriptions } from '@/lib/subscriptions'
 
 /**
  * Quit-time persistence: the webview never dies with dirty note buffers still
@@ -18,6 +19,9 @@ import { flushSettings } from '@/lib/settings-flush'
  *   already surfaced per-note, and refusing to quit would trap the user).
  * - **Webview unload** (dev reloads): `beforeunload` can't await, but writes
  *   dispatched before teardown still reach the Rust process — a belt.
+ *
+ * Mobile's exit is backgrounding, not quitting — its leg of the same flush
+ * sequence lives in `background-flush.ts` (Plan 19, decision 6).
  */
 export function installQuitFlush(): () => void {
   // No bridge → no native shell (plain-browser dev): nothing can quit-flush.
@@ -26,33 +30,28 @@ export function installQuitFlush(): () => void {
     return () => {}
   }
 
-  let disposed = false
-  const disposers: Array<() => void> = []
-  const track = (dispose: () => void): void => {
-    // A subscription can resolve after teardown (StrictMode's probe mount).
-    if (disposed) {
-      dispose()
-    } else {
-      disposers.push(dispose)
-    }
-  }
+  // A subscription can resolve after teardown (StrictMode's probe mount) —
+  // the tracker disposes it on the spot.
+  const subscriptions = trackSubscriptions()
 
   // Note buffers land first, then the backup commit captures them (a local
   // git commit only — pushing on the way out could stall the quit).
-  void getCurrentWindow()
-    .onCloseRequested(async () => {
+  void subscriptions.add(
+    getCurrentWindow().onCloseRequested(async () => {
       await Promise.all([flushOpenDocuments(), flushSettings()])
       await flushBackup()
-    })
-    .then(track)
+    }),
+  )
 
-  void subscribeQuitRequested(() => {
-    void Promise.allSettled([flushOpenDocuments(), flushSettings()])
-      .then(() => flushBackup())
-      .then(() => {
-        void confirmQuit()
-      })
-  }).then(track)
+  void subscriptions.add(
+    subscribeQuitRequested(() => {
+      void Promise.allSettled([flushOpenDocuments(), flushSettings()])
+        .then(() => flushBackup())
+        .then(() => {
+          void confirmQuit()
+        })
+    }),
+  )
 
   const onBeforeUnload = (): void => {
     void flushOpenDocuments()
@@ -60,13 +59,9 @@ export function installQuitFlush(): () => void {
     void flushBackup()
   }
   window.addEventListener('beforeunload', onBeforeUnload)
-  track(() => window.removeEventListener('beforeunload', onBeforeUnload))
+  subscriptions.track(() => window.removeEventListener('beforeunload', onBeforeUnload))
 
   return () => {
-    disposed = true
-    for (const dispose of disposers) {
-      dispose()
-    }
-    disposers.length = 0
+    subscriptions.disposeAll()
   }
 }

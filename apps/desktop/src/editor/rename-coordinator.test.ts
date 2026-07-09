@@ -103,6 +103,7 @@ function fakeSession(content: string): NoteSession & {
     externalChanged: () => {},
     flush: vi.fn(async () => {}),
     keepMine: () => {},
+    isDirty: () => false,
     loadTheirs: () => {},
     commitFrontmatter: async () => true,
     content: () => content,
@@ -112,6 +113,7 @@ function fakeSession(content: string): NoteSession & {
     commitTaskEdit: async () => false,
     commitTaskRemove: async () => false,
     commitTaskToBullet: async () => false,
+    commitBodyAppend: async () => false,
     dispose: () => {},
     discard: () => {},
   }

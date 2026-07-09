@@ -111,12 +111,15 @@ vi.mock('@/lib/provider-fetch', () => ({ providerFetch: vi.fn() }))
 // jsdom doesn't implement this; Radix Select scrolls the selected option into
 // view when the listbox opens.
 Element.prototype.scrollIntoView ??= () => {}
+// shadcn's MessageScroller drives the viewport with scrollTo; jsdom has no
+// layout engine, so the browser API is stubbed for interaction tests.
+Element.prototype.scrollTo ??= () => {}
 
 const { ChatScreen } = await import('./chat-screen')
 
 afterEach(cleanup)
 
-const GRAPH: GraphInfo = { root: '/graphs/test', name: 'test-graph', cloudSync: null, generation: 1 }
+const GRAPH: GraphInfo = { root: '/graphs/test', name: 'test-graph', generation: 1 }
 
 const GRAPH_CONTEXT = cloudSafeGraphContext({
   graphName: 'test-graph',
@@ -387,6 +390,39 @@ describe('ChatScreen', () => {
     await view.findByText(/Listed daily notes 2026-06-01 – 2026-06-11 · 2 days/)
     await userEvent.click(view.getByRole('button', { name: '2026-06-10' }))
     expect(probedRoute).toEqual({ kind: 'daily', date: '2026-06-10' })
+  })
+
+  it('renders an attachment chip: filenames, with per-asset refusals inline', async () => {
+    configureModel()
+    scriptTurn([
+      {
+        type: 'tool-call',
+        call: {
+          tool: 'assets',
+          toolCallId: 'tool-1',
+          paths: ['assets/chart.png', 'assets/scan.pdf'],
+        },
+      },
+      {
+        type: 'tool-result',
+        result: {
+          tool: 'assets',
+          toolCallId: 'tool-1',
+          assets: [
+            { path: 'assets/chart.png', error: null },
+            { path: 'assets/scan.pdf', error: 'This asset cannot be read by AI.' },
+          ],
+        },
+      },
+      { type: 'complete', messages: [{ role: 'assistant', content: 'Done.' }] },
+    ])
+    const view = renderChat()
+
+    await userEvent.type(view.getByLabelText('Chat message'), 'what does the chart show?{Enter}')
+
+    // Entries are labeled by filename; a refused asset keeps its refusal inline.
+    await view.findByText('chart.png')
+    await view.findByText(/scan\.pdf — This asset cannot be read by AI\./)
   })
 
   it('renders streaming text as plain text until the turn settles', async () => {

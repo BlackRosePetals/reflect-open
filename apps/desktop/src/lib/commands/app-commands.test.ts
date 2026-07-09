@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { EmbedStatus, NoteRow, PinnedNote } from '@reflect/core'
 import { notePathForRoute, type Route } from '@/routing/route'
+import type { NavigateOptions } from '@/routing/router'
 import { resetOperations } from '@/lib/operations'
 import type { CommandContext } from './types'
 
@@ -14,6 +15,7 @@ const embedStatus = vi.hoisted(() =>
 const backfillEmbeddingsVisibly = vi.hoisted(() => vi.fn(async () => 'completed'))
 const toggleNotePinned = vi.hoisted(() => vi.fn(async () => true))
 const toggleNotePrivate = vi.hoisted(() => vi.fn(async () => true))
+const runCopyDeepLink = vi.hoisted(() => vi.fn(async () => undefined))
 const getNote = vi.hoisted(() => vi.fn<() => Promise<NoteRow | undefined>>(async () => undefined))
 const getPinnedNotes = vi.hoisted(() => vi.fn<() => Promise<PinnedNote[]>>(async () => []))
 const hasBridge = vi.hoisted(() => vi.fn(() => true))
@@ -28,6 +30,7 @@ vi.mock('@/lib/semantic', async (importOriginal) => ({
 }))
 vi.mock('@/lib/note-pin', () => ({ toggleNotePinned }))
 vi.mock('@/lib/note-private', () => ({ toggleNotePrivate }))
+vi.mock('@/lib/note-deep-link', () => ({ runCopyDeepLink }))
 vi.mock('@/lib/operations', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/operations')>()),
   startOperation,
@@ -56,26 +59,34 @@ function command(id: string) {
 
 function fakeContext(overrides?: Partial<CommandContext>) {
   const navigated: Route[] = []
+  const navigateOptions: (NavigateOptions | undefined)[] = []
   const route: () => Route = overrides?.route ?? (() => ({ kind: 'today' }))
   const context: CommandContext = {
-    navigate: (target) => void navigated.push(target),
+    navigate: (target, options) => {
+      navigated.push(target)
+      navigateOptions.push(options)
+    },
     route,
     // Mirror the real context: note-scoped commands resolve their target from
     // the route (the focused-day branch is exercised in app-shortcuts).
     notePath: () => notePathForRoute(route(), TODAY),
     back: vi.fn(),
     forward: vi.fn(),
+    clearScrollState: vi.fn(),
     toggleTheme: vi.fn(),
     toggleSidebar: vi.fn(),
     newChat: vi.fn(),
+    switchGraph: vi.fn(),
     toggleAudioMemo: vi.fn(),
     generation: () => 7,
     openPalette: vi.fn(),
     openShortcuts: vi.fn(),
+    openTemplatePicker: vi.fn(),
+    openTemplateCreate: vi.fn(),
     enableSemanticSearch: vi.fn(),
     ...overrides,
   }
-  return { context, navigated }
+  return { context, navigated, navigateOptions }
 }
 
 function noteRow(isPrivate: boolean): NoteRow {
@@ -109,13 +120,25 @@ describe('keybindingFor', () => {
   it('dev.toggleDevtools is bound to Mod-Shift-i', () => {
     expect(keybindingFor('dev.toggleDevtools')).toBe('Mod-Shift-i')
   })
+
+  it('note.copyDeepLink keeps the V1 copy-link shortcut', () => {
+    expect(keybindingFor('note.copyDeepLink')).toBe('Alt-Mod-l')
+  })
+
+  it('graph switch commands use macOS command-number bindings', () => {
+    expect(keybindingFor('graph.switch1')).toBe('Meta-1')
+    expect(keybindingFor('graph.switch9')).toBe('Meta-9')
+  })
 })
 
 describe('app commands', () => {
   it('nav.today, history, palette, theme, and sidebar commands hit their capabilities', async () => {
-    const { context, navigated } = fakeContext()
+    const { context, navigated, navigateOptions } = fakeContext()
     await command('nav.today').run(context)
     expect(navigated).toEqual([{ kind: 'today' }])
+    // ⌘D is a capture gesture: the arrival asks the stream to focus today's
+    // editor at the end of its content, ready to append.
+    expect(navigateOptions).toEqual([{ focusEditor: true }])
     await command('history.back').run(context)
     expect(context.back).toHaveBeenCalled()
     await command('history.forward').run(context)
@@ -143,6 +166,23 @@ describe('app commands', () => {
     expect(keybindingFor('shortcuts.show')).toBe('Mod-/')
   })
 
+  it('template.insert opens the picker only where a note is being edited', async () => {
+    const { context } = fakeContext({ route: () => ({ kind: 'note', path: 'notes/a.md' }) })
+    await command('template.insert').run(context)
+    expect(context.openTemplatePicker).toHaveBeenCalledTimes(1)
+
+    // Settings edits no note — there is nothing to insert into.
+    const { context: noNote } = fakeContext({ route: () => ({ kind: 'settings' }) })
+    await command('template.insert').run(noNote)
+    expect(noNote.openTemplatePicker).not.toHaveBeenCalled()
+  })
+
+  it('template.new opens the name dialog through the context capability', async () => {
+    const { context } = fakeContext()
+    await command('template.new').run(context)
+    expect(context.openTemplateCreate).toHaveBeenCalledTimes(1)
+  })
+
   it('chat.new starts a fresh conversation only from the chat route', async () => {
     const { context } = fakeContext({ route: () => ({ kind: 'chat' }) })
     await command('chat.new').run(context)
@@ -154,13 +194,36 @@ describe('app commands', () => {
     expect(outsideChat.newChat).not.toHaveBeenCalled()
   })
 
-  it('note.new navigates to a fresh lazy ULID note path', async () => {
-    const { context, navigated } = fakeContext()
+  it('graph switch commands select their recent graph position', async () => {
+    const switchGraph = vi.fn()
+    const { context } = fakeContext({ switchGraph })
+
+    await command('graph.switch1').run(context)
+    await command('graph.switch9').run(context)
+
+    expect(switchGraph).toHaveBeenNthCalledWith(1, 0)
+    expect(switchGraph).toHaveBeenNthCalledWith(2, 8)
+  })
+
+  it('note.new clears daily scroll and navigates to a fresh lazy ULID note path', async () => {
+    const clearScrollState = vi.fn()
+    const { context, navigated } = fakeContext({ clearScrollState })
     await command('note.new').run(context)
+    expect(clearScrollState).toHaveBeenCalledTimes(1)
     expect(navigated).toHaveLength(1)
     const route = navigated[0]!
     expect(route.kind).toBe('note')
     expect((route as { kind: 'note'; path: string }).path).toMatch(/^notes\/[0-9a-z]+\.md$/)
+  })
+
+  it('note.new leaves non-daily route scroll restoration intact', async () => {
+    const clearScrollState = vi.fn()
+    const { context } = fakeContext({
+      clearScrollState,
+      route: () => ({ kind: 'allNotes', tag: null }),
+    })
+    await command('note.new').run(context)
+    expect(clearScrollState).not.toHaveBeenCalled()
   })
 
   it('note.random navigates to the picked note and no-ops on an empty graph', async () => {
@@ -246,6 +309,22 @@ describe('app commands', () => {
     const { context } = fakeContext({ route: () => ({ kind: 'note', path: 'notes/a.md' }) })
     await expect(command('note.togglePrivate').run(context)).resolves.toBeUndefined()
     expect(startOperation).toHaveBeenCalledWith('Unlocking note')
+  })
+
+  it('note.copyDeepLink copies the route note through the keyboard command', async () => {
+    runCopyDeepLink.mockClear()
+    const { context } = fakeContext({ route: () => ({ kind: 'note', path: 'notes/a.md' }) })
+    await command('note.copyDeepLink').run(context)
+    expect(runCopyDeepLink).toHaveBeenCalledWith('notes/a.md', 7)
+  })
+
+  it('note.copyDeepLink no-ops on note-less routes and without a graph', async () => {
+    runCopyDeepLink.mockClear()
+    const { context } = fakeContext({ route: () => ({ kind: 'settings' }) })
+    await command('note.copyDeepLink').run(context)
+    const { context: noGraph } = fakeContext({ generation: () => null })
+    await command('note.copyDeepLink').run(noGraph)
+    expect(runCopyDeepLink).not.toHaveBeenCalled()
   })
 
   it('dev.toggleDevtools toggles the inspector through the native shell', async () => {

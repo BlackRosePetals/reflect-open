@@ -1,20 +1,22 @@
 import {
   createContext,
   useContext,
-  useEffect,
   useMemo,
   useState,
   useSyncExternalStore,
   type ReactElement,
   type ReactNode,
 } from 'react'
-import { ReflectError, type GithubRepoRef, type GraphInfo } from '@reflect/core'
+import { hasBridge, ReflectError, type GithubRepoRef, type GraphInfo } from '@reflect/core'
 import {
   createBackupController,
   type BackupController,
   type BackupState,
   type ConnectExistingResult,
 } from '@/lib/backup-controller'
+import { createIcloudController, isICloudRoot } from '@/lib/icloud-controller'
+import { useMainWindowEffect } from '@/hooks/use-main-window-effect'
+import { isMobileSurface } from '@/lib/platform-surface'
 import { useGraph } from '@/providers/graph-provider'
 
 export type { BackupState, ConnectExistingResult } from '@/lib/backup-controller'
@@ -53,17 +55,38 @@ export function SyncProvider({ graph, children }: SyncProviderProps): ReactEleme
   const { indexGeneration } = useGraph()
   const [controller, setController] = useState<BackupController | null>(null)
 
-  useEffect(() => {
+  // One backup controller per app: a secondary note window mounting a
+  // second one would race commits/pulls against the main window's. Its
+  // sync state stays 'loading' — the note window edits, main syncs.
+  useMainWindowEffect(() => {
     const next = createBackupController({ graph, indexGeneration })
     // The controller is an imperative lifecycle object created per (graph, index
     // session); it must be instantiated in an effect (it subscribes and starts)
     // and stored so useSyncExternalStore can read it.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setController(next)
     void next.start()
     return () => {
       next.dispose()
       setController((current) => (current === next ? null : current))
+    }
+  }, [graph, indexGeneration])
+
+  // iCloud-hosted graphs additionally get the conflict lifecycle (Plan 21):
+  // the metadata-query watch, debounced conflict sweeps, and shadow-base
+  // bookkeeping. Same per-(graph, index session) shape as the backup
+  // controller; a graph outside iCloud mounts nothing.
+  useMainWindowEffect(() => {
+    if (!hasBridge() || !isICloudRoot(graph.root)) {
+      return
+    }
+    const icloud = createIcloudController({
+      graph,
+      indexGeneration,
+      emitFileChangesFromWatch: isMobileSurface(),
+    })
+    void icloud.start()
+    return () => {
+      icloud.dispose()
     }
   }, [graph, indexGeneration])
 
@@ -99,4 +122,14 @@ export function useSync(): SyncContextValue {
     throw new Error('useSync must be used within a SyncProvider')
   }
   return value
+}
+
+/**
+ * Like {@link useSync}, but `null` outside a provider. For surfaces that also
+ * render where no backup lifecycle is mounted — the mobile settings sheet in
+ * the plain-browser dev harness and in screen tests — and degrade by hiding
+ * their sync rows instead of crashing.
+ */
+export function useSyncContext(): SyncContextValue | null {
+  return useContext(SyncContext)
 }

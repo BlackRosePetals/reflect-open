@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef } from 'react'
-import { resolveWikiTarget } from '@reflect/core'
-import { createNoteWithTitle } from '@/lib/create-note'
+import { createNoteWithTitle, resolveWikiTarget } from '@reflect/core'
 import { isIsoDate } from '@/lib/dates'
-import { routeForPath } from '@/routing/route'
+import { isNewWindowClick, openRouteInNewWindow } from '@/lib/windows/open-in-new-window'
+import { routeForPath, type Route } from '@/routing/route'
 import { useRouter } from '@/routing/router'
 
 /**
@@ -12,6 +12,12 @@ import { useRouter } from '@/routing/router'
  * opened on the spot — Plan 07's create-from-unresolved, consistent with lazy
  * dailies. With no graph generation available, unresolved titles are a no-op
  * (nothing can be written).
+ *
+ * A ⌘-click (the originating `event`, when the caller passes it) opens the
+ * resolved target in a secondary note window instead — falling back to
+ * in-window navigation whenever the surface can't (browser dev, mobile), so
+ * the modifier never makes a link do nothing. Keyboard follows (Mod-Enter)
+ * deliberately stay in-window: their modifier is held by definition.
  *
  * Resolution is async, and the host pane can unmount while it's in flight
  * (route change, graph switch) — a late navigate would yank the user somewhere
@@ -23,7 +29,9 @@ import { useRouter } from '@/routing/router'
  * @returns a stable-per-`generation` click handler for the editor's wiki-link
  *   extension.
  */
-export function useWikiLinkNavigation(generation: number | null): (target: string) => void {
+export function useWikiLinkNavigation(
+  generation: number | null,
+): (target: string, event?: MouseEvent | KeyboardEvent) => void {
   const { navigate } = useRouter()
 
   const unmountedRef = useRef(false)
@@ -35,7 +43,21 @@ export function useWikiLinkNavigation(generation: number | null): (target: strin
   }, [])
 
   return useCallback(
-    (target: string) => {
+    (target: string, event?: MouseEvent | KeyboardEvent) => {
+      const newWindow = isNewWindowClick(event)
+      const open = async (route: Route): Promise<void> => {
+        if (newWindow) {
+          if (await openRouteInNewWindow(route)) {
+            return
+          }
+          // The await above opened an unmount window; a late fallback must
+          // not yank a pane the user already left.
+          if (unmountedRef.current) {
+            return
+          }
+        }
+        navigate(route)
+      }
       void (async () => {
         try {
           const resolution = await resolveWikiTarget(target)
@@ -43,13 +65,17 @@ export function useWikiLinkNavigation(generation: number | null): (target: strin
             return
           }
           if (resolution.kind === 'resolved') {
-            navigate(routeForPath(resolution.ref))
+            const route = routeForPath(resolution.ref)
+            // Deliberately no focus request: on mobile, focusing mid-arrival
+            // raises the keyboard through the stack animation. Desktop
+            // autofocuses note arrivals on its own.
+            await open(route)
           } else if (isIsoDate(resolution.text)) {
-            navigate({ kind: 'daily', date: resolution.text })
+            await open({ kind: 'daily', date: resolution.text })
           } else if (generation !== null && resolution.text.trim() !== '') {
             const created = await createNoteWithTitle(resolution.text, generation)
             if (!unmountedRef.current) {
-              navigate({ kind: 'note', path: created })
+              await open({ kind: 'note', path: created })
             }
           }
         } catch (err) {

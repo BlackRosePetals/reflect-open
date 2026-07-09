@@ -18,22 +18,49 @@ struct KeyboardState: Encodable {
 /// nudges the webview's scroll view around when the keyboard animates in,
 /// occluding whatever the caret is in. This plugin takes manual control —
 /// the webview keeps its full-screen frame, scroll-view auto-adjustment is
-/// disabled, and the keyboard's overlap height streams to JS as
+/// disabled, its scroll offset is pinned to zero (WebKit's caret-reveal
+/// scroll would otherwise push the page out of the window on focus), and
+/// the keyboard's overlap height streams to JS as
 /// `keyboardChange` events so the layout can make room (a CSS variable, a
 /// pinned toolbar, caret scroll-into-view).
+///
+/// As Reflect's only native UIKit touch bridge, it also carries the app's
+/// tiny haptics surface (`impactLight`) — WKWebView has no
+/// `navigator.vibrate`, so JS cannot fire haptics on its own.
 class KeyboardPlugin: Plugin {
   private weak var webView: WKWebView?
   private var currentState = KeyboardState(height: 0, duration: 0)
+  private var scrollOffsetObservation: NSKeyValueObservation?
+  // Lazy so the generator is created on the main thread, inside the first
+  // `impactLight` dispatch; kept alive across taps to skip re-allocating
+  // the underlying haptic engine on every press.
+  private lazy var lightImpactGenerator = UIImpactFeedbackGenerator(style: .light)
 
   @objc public override func load(webview: WKWebView) {
     self.webView = webview
     // The system's automatic inset adjustment is the source of the jump:
     // page layout owns keyboard avoidance instead (via the events below).
     webview.scrollView.contentInsetAdjustmentBehavior = .never
+    // That flag alone doesn't stop WebKit's own keyboard avoidance: on focus
+    // it scrolls the *native* scroll view to reveal the caret, not knowing
+    // the page layout already made room — shoving the whole app upward out
+    // of the window. The page is always exactly viewport-sized here (inner
+    // elements own all scrolling, pinch zoom is disabled by the viewport
+    // meta), so any native offset is that nudge. Pin it back to zero.
+    scrollOffsetObservation = webview.scrollView.observe(\.contentOffset, options: [.new]) {
+      scrollView, _ in
+      guard scrollView.contentOffset != .zero else { return }
+      scrollView.setContentOffset(.zero, animated: false)
+    }
     // iOS injects a form-assistant bar (‹ › field stepper + Done) above the
     // keyboard for any focused field or contenteditable. Reflect edits one
     // continuous document, so the bar is meaningless chrome — strip it.
     Self.suppressInputAccessoryBar()
+    // WebKit only raises the keyboard for a focus() that runs inside a user
+    // gesture; Reflect's deliberate programmatic focuses (the task sheet's
+    // "+" add flow, new-note autofocus) run after an async write, so they
+    // landed with the keyboard down. Lift the restriction.
+    Self.allowProgrammaticFocus()
     let center = NotificationCenter.default
     center.addObserver(
       self,
@@ -86,6 +113,18 @@ class KeyboardPlugin: Plugin {
     invoke.resolve(currentState)
   }
 
+  /// Fire a light impact haptic — V1 parity for date-selection, task controls,
+  /// and tab taps. `UIFeedbackGenerator` is main-thread-only; resolve immediately
+  /// rather than after the dispatch since the tap has already happened and
+  /// callers are fire-and-forget. Silently does nothing on hardware
+  /// without a haptic engine (iPads, the simulator).
+  @objc public func impactLight(_ invoke: Invoke) {
+    DispatchQueue.main.async {
+      self.lightImpactGenerator.impactOccurred()
+    }
+    invoke.resolve()
+  }
+
   /// `WKContentView` (the webview's private first responder) returns the
   /// keyboard's form-assistant bar from `inputAccessoryView`. Replace that
   /// getter at the *class* level with one returning nil, so the swap doesn't
@@ -107,6 +146,38 @@ class KeyboardPlugin: Plugin {
     } else {
       class_replaceMethod(contentClass, selector, implementation, "@@:")
     }
+  }
+
+  /// WebKit gates keyboard presentation on `userIsInteracting`: a `focus()`
+  /// outside a user gesture's event loop moves DOM focus but leaves the
+  /// keyboard down. Reflect reserves programmatic focus for explicit write
+  /// gestures whose focus target only exists after an async hop (navigation
+  /// never focuses — the PR #575 contract), so every such focus should
+  /// present the keyboard: rewrite `WKContentView`'s focus notification to
+  /// always report user interaction — the same swizzle Capacitor/Cordova
+  /// ship as `keyboardDisplayRequiresUserAction = false`. The remaining
+  /// arguments pass through untouched. Guarded by the class/selector lookup,
+  /// so a WebKit rename degrades to "keyboard stays down" rather than
+  /// crashing. Idempotent via the static flag.
+  private static var didAllowProgrammaticFocus = false
+  private static func allowProgrammaticFocus() {
+    guard !didAllowProgrammaticFocus, let contentClass = NSClassFromString("WKContentView")
+    else { return }
+    didAllowProgrammaticFocus = true
+    // The iOS 13+ spelling of the notification (deployment target is 14).
+    let selector = NSSelectorFromString(
+      "_elementDidFocus:userIsInteracting:blurPreviousNode:activityStateChanges:userObject:")
+    guard let method = class_getInstanceMethod(contentClass, selector) else { return }
+    typealias ElementDidFocus = @convention(c) (
+      AnyObject, Selector, UnsafeRawPointer, Bool, Bool, UInt, AnyObject?
+    ) -> Void
+    let original = unsafeBitCast(method_getImplementation(method), to: ElementDidFocus.self)
+    let block: @convention(block) (
+      AnyObject, UnsafeRawPointer, Bool, Bool, UInt, AnyObject?
+    ) -> Void = { view, element, _, blurPreviousNode, activityStateChanges, userObject in
+      original(view, selector, element, true, blurPreviousNode, activityStateChanges, userObject)
+    }
+    method_setImplementation(method, imp_implementationWithBlock(block))
   }
 }
 

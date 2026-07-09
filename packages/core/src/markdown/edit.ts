@@ -116,7 +116,7 @@ export function removeTaskLine(source: string, task: TaskMarker): string {
 }
 
 /**
- * Append a new empty task — a `- [ ] ` line — to the end of `source`, returning
+ * Append a new empty task — a `+ [ ] ` line — to the end of `source`, returning
  * the new source and the marker's offset (the `[`). The Tasks view's Return-to-add
  * (Plan 18) writes the empty line, then the inline editor on the new row fills it.
  * A single newline separates it from existing content (continuing a trailing
@@ -126,13 +126,13 @@ export function removeTaskLine(source: string, task: TaskMarker): string {
  */
 export function appendTaskLine(source: string): { source: string; markerOffset: number } {
   const base = source.replace(/\s*$/, '')
-  const prefix = base.length > 0 ? `${base}\n- ` : '- '
+  const prefix = base.length > 0 ? `${base}\n+ ` : '+ '
   return { source: `${prefix}[ ] \n`, markerOffset: prefix.length }
 }
 
 /**
  * Demote a task back to a plain bullet by removing exactly its `[ ]`/`[x]` marker
- * and the run of horizontal whitespace after it — `- [ ] text` becomes `- text`,
+ * and the run of horizontal whitespace after it — `+ [ ] text` becomes `+ text`,
  * the list bullet, indentation, and content all untouched. This is the Tasks
  * view's "Convert to bullet" (Plan 18 follow-up): a GFM checkbox is the only
  * thing the projection treats as a task, so dropping the marker lifts the item
@@ -141,7 +141,7 @@ export function appendTaskLine(source: string): { source: string; markerOffset: 
  * locateTaskMarker}, the same staleness guard the toggle uses, so a drifted or
  * ambiguous line — or a position that no longer holds a marker — refuses loudly
  * with {@link TaskStaleError} rather than rewriting the wrong line. An empty task
- * (`- [ ] `) collapses to a bare bullet (`- `).
+ * (`+ [ ] `) collapses to a bare bullet (`+ `).
  */
 export function taskLineToBullet(source: string, task: TaskMarker): string {
   const offset = locateTaskMarker(source, task.markerOffset, task.raw)
@@ -239,10 +239,13 @@ function nextSectionStart(headings: Heading[], target: Heading, eof: number): nu
 }
 
 /**
- * Insert `block` at the end of the section under the first heading whose text
- * matches `heading` (case-insensitive). If no such heading exists, append a new
- * `## heading` section at end of file. Used by capture (Plan 11).
+ * `[[…]]` has no escaping — strip the characters that would corrupt a link
+ * before embedding untrusted text (a page title, a meeting name) in one.
  */
+export function wikiLinkSafe(text: string): string {
+  return text.replace(/[[\]|\r\n]/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
 /**
  * Append `block` as its own paragraph at the end of the note, one blank line
  * after the existing content (none for an empty note). The flat variant of
@@ -255,6 +258,12 @@ export function appendBlock(source: string, block: string): string {
   return `${prefix}${block.trim()}\n`
 }
 
+/**
+ * Insert `block` at the end of the section under the first heading whose text
+ * matches `heading` (case-insensitive). If no such heading exists, append a new
+ * `## heading` section at end of file. Used by capture (Plan 11) and the
+ * add-meeting action.
+ */
 export function appendUnderHeading(source: string, heading: string, block: string): string {
   const headingKey = heading.trim().toLowerCase()
   const { headings } = parseNote({ path: '', source })

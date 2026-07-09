@@ -9,8 +9,10 @@ use super::chat_write::{delete_conversation, save_message, ChatConversation, Cha
 use super::embed_write::{apply_chunks, remove_chunks, EmbeddedChunk};
 use super::migrations::{migrate, migrate_to, open_in_memory, open_index_at, validate_migrations};
 use super::query::run_query;
+use super::scan::scan_reconcile;
 use super::write::{
-    apply_note, clear_index, move_note, IndexedLink, IndexedNote, IndexedTag, IndexedTask,
+    apply_note, clear_index, move_note, touch_note, IndexedEmail, IndexedLink, IndexedNote,
+    IndexedTag, IndexedTask,
 };
 
 fn migrated() -> Connection {
@@ -28,6 +30,7 @@ fn note(path: &str, title: &str, links: Vec<IndexedLink>) -> IndexedNote {
         id: None,
         title: title.to_string(),
         title_key: title.to_lowercase(),
+        kind: "note".to_string(),
         daily_date: None,
         is_private: false,
         is_pinned: false,
@@ -43,6 +46,7 @@ fn note(path: &str, title: &str, links: Vec<IndexedLink>) -> IndexedNote {
         links,
         tags: vec![],
         aliases: vec![],
+        emails: vec![],
         assets: vec![],
         tasks: vec![],
     }
@@ -77,7 +81,7 @@ fn migrations_are_valid_and_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 13); // applied migrations (0001 through 0013)
+    assert_eq!(version, 16); // applied migrations (0001 through 0016)
     migrate(&mut conn).expect("re-running to_latest is a no-op");
 }
 
@@ -155,6 +159,44 @@ fn preview_and_tag_keys_round_trip() {
 }
 
 #[test]
+fn note_emails_apply_move_and_cascade() {
+    let conn = migrated();
+    let mut person = note("notes/jane-doe.md", "Jane Doe", vec![]);
+    person.emails = vec![IndexedEmail {
+        email: "Jane@Corp.com".to_string(),
+        email_key: "jane@corp.com".to_string(),
+    }];
+    apply_note(&conn, &person).unwrap();
+
+    // Display casing and the folded match key are stored side by side, like tags.
+    let rows = run_query(
+        &conn,
+        "SELECT note_path, email, email_key FROM note_emails",
+        &[],
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["email"], Value::from("Jane@Corp.com"));
+    assert_eq!(rows[0]["email_key"], Value::from("jane@corp.com"));
+
+    // A rename carries the rows to the new path (inside the same deferred-FK
+    // transaction the command layer would open).
+    conn.execute_batch("BEGIN; PRAGMA defer_foreign_keys = ON;")
+        .unwrap();
+    move_note(&conn, "notes/jane-doe.md", "notes/jane.md").unwrap();
+    conn.execute_batch("COMMIT;").unwrap();
+    let moved = run_query(&conn, "SELECT note_path FROM note_emails", &[]).unwrap();
+    assert_eq!(moved[0]["note_path"], Value::from("notes/jane.md"));
+
+    // Re-applying with no emails replaces the rows rather than accreting.
+    let mut renamed = note("notes/jane.md", "Jane Doe", vec![]);
+    renamed.emails = vec![];
+    apply_note(&conn, &renamed).unwrap();
+    let cleared = run_query(&conn, "SELECT note_path FROM note_emails", &[]).unwrap();
+    assert!(cleared.is_empty());
+}
+
+#[test]
 fn backlinks_resolve_by_title_at_query_time() {
     let conn = migrated();
     // Source links to "Target" before the target note even exists.
@@ -177,6 +219,34 @@ fn backlinks_resolve_by_title_at_query_time() {
     .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["source_path"], Value::from("notes/a.md"));
+}
+
+#[test]
+fn templates_are_invisible_to_backlink_resolution() {
+    let conn = migrated();
+    let mut template = note("templates/journal.md", "Journal", vec![wiki("Target")]);
+    template.kind = "template".to_string();
+    apply_note(&conn, &template).unwrap();
+    apply_note(&conn, &note("notes/target.md", "Target", vec![])).unwrap();
+    apply_note(&conn, &note("notes/a.md", "A", vec![wiki("Journal")])).unwrap();
+
+    // A note linking [[Journal]] must not resolve to the template's title…
+    let to_template = run_query(
+        &conn,
+        "SELECT source_path FROM backlinks WHERE target_path = ?1",
+        &[Value::from("templates/journal.md")],
+    )
+    .unwrap();
+    assert!(to_template.is_empty());
+
+    // …and the template's boilerplate [[Target]] link is not a graph edge.
+    let from_template = run_query(
+        &conn,
+        "SELECT source_path FROM backlinks WHERE target_path = ?1",
+        &[Value::from("notes/target.md")],
+    )
+    .unwrap();
+    assert!(from_template.is_empty());
 }
 
 #[test]
@@ -341,6 +411,86 @@ fn reapplying_a_note_replaces_its_rows() {
 }
 
 #[test]
+fn reconcile_scan_classifies_candidates_orphans_and_skips() {
+    let conn = migrated();
+    let now: u64 = 100_000;
+    let indexed = |path: &str, mtime: i64, hash: &str| {
+        let mut row = note(path, "T", vec![]);
+        row.mtime = mtime;
+        row.file_hash = hash.to_string();
+        apply_note(&conn, &row).unwrap();
+    };
+    indexed("notes/settled.md", 1_000, "settled-hash");
+    indexed("notes/moved.md", 1_000, "moved-hash");
+    indexed("notes/fresh.md", (now - 1_000) as i64, "fresh-hash");
+    indexed("notes/evicted.md", 1_000, "evicted-hash");
+    indexed("notes/gone.md", 1_000, "gone-hash");
+
+    let meta = |path: &str, modified_ms: u64, placeholder: bool| crate::fs::FileMeta {
+        path: path.to_string(),
+        size: 1,
+        modified_ms,
+        placeholder,
+    };
+    let files = [
+        meta("notes/settled.md", 1_000, false), // row matches, settled → skipped
+        meta("notes/moved.md", 2_000, false),   // mtime moved → candidate with facts
+        meta("notes/fresh.md", now - 1_000, false), // matches but too fresh to trust → candidate
+        meta("notes/new.md", 3_000, false),     // no row → arrival candidate
+        meta("notes/evicted.md", 9_000, true),  // placeholder → never a candidate, never orphaned
+    ];
+
+    let scan = scan_reconcile(&conn, &files, now).unwrap();
+
+    assert_eq!(scan.total, 5);
+    let paths: Vec<&str> = scan
+        .candidates
+        .iter()
+        .map(|candidate| candidate.path.as_str())
+        .collect();
+    assert_eq!(paths, ["notes/moved.md", "notes/fresh.md", "notes/new.md"]);
+    let moved = &scan.candidates[0];
+    assert_eq!(moved.modified_ms, 2_000);
+    assert_eq!(moved.stored_mtime, Some(1_000));
+    assert_eq!(moved.stored_hash.as_deref(), Some("moved-hash"));
+    let arrival = &scan.candidates[2];
+    assert_eq!(arrival.stored_mtime, None);
+    assert_eq!(arrival.stored_hash, None);
+
+    // Only the vanished row is an orphan — eviction must not read as deletion.
+    let orphan_paths: Vec<&str> = scan
+        .orphans
+        .iter()
+        .map(|orphan| orphan.path.as_str())
+        .collect();
+    assert_eq!(orphan_paths, ["notes/gone.md"]);
+    assert_eq!(scan.orphans[0].stored_hash, "gone-hash");
+    assert_eq!(scan.orphans[0].stored_mtime, 1_000);
+}
+
+#[test]
+fn touch_note_restamps_mtime_and_updated_at_without_creating_rows() {
+    let conn = migrated();
+    apply_note(&conn, &note("notes/a.md", "A", vec![])).unwrap();
+
+    touch_note(&conn, "notes/a.md", 4_200).unwrap();
+    let rows = run_query(
+        &conn,
+        "SELECT mtime, updated_at FROM notes WHERE path = ?1",
+        &[Value::from("notes/a.md")],
+    )
+    .unwrap();
+    assert_eq!(rows[0]["mtime"], Value::from(4_200));
+    assert_eq!(rows[0]["updated_at"], Value::from(4_200));
+
+    // A path with no row updates nothing — a touch must never resurrect a
+    // removed note.
+    touch_note(&conn, "notes/gone.md", 4_200).unwrap();
+    let count = run_query(&conn, "SELECT COUNT(*) AS n FROM notes", &[]).unwrap();
+    assert_eq!(count[0]["n"], Value::from(1));
+}
+
+#[test]
 fn fts_matches_indexed_body() {
     let conn = migrated();
     apply_note(&conn, &note("notes/a.md", "Quick", vec![])).unwrap();
@@ -468,7 +618,8 @@ fn open_tasks_read_includes_private_notes_and_excludes_completed() {
     // to note context, completed tasks excluded, and `private: true` notes' tasks
     // INCLUDED (the Tasks view is a local-only surface, like local search).
     let conn = migrated();
-    let mut public = note("notes/a.md", "A", vec![]);
+    let mut public = note("daily/2026-06-10.md", "A", vec![]);
+    public.kind = "daily".to_string();
     public.daily_date = Some("2026-06-10".to_string());
     public.tasks = vec![task(2, "open a", false)];
     apply_note(&conn, &public).unwrap();
@@ -488,7 +639,7 @@ fn open_tasks_read_includes_private_notes_and_excludes_completed() {
     .unwrap();
 
     assert_eq!(rows.len(), 2); // both open tasks; the completed one is gone
-    assert_eq!(rows[0]["note_path"], Value::from("notes/a.md"));
+    assert_eq!(rows[0]["note_path"], Value::from("daily/2026-06-10.md"));
     assert_eq!(rows[0]["text"], Value::from("open a"));
     assert_eq!(rows[0]["note_title"], Value::from("A"));
     assert_eq!(rows[0]["daily_date"], Value::from("2026-06-10"));
@@ -513,6 +664,134 @@ fn link_kind_check_rejects_unknown_kinds() {
 }
 
 #[test]
+fn note_kind_daily_date_invariant_is_enforced() {
+    // `kind` and `daily_date` both derive from the path in `buildIndexedNote`,
+    // so they agree by construction — the 0015 CHECK makes SQLite reject any
+    // writer that drifts: kind = 'daily' iff daily_date is set.
+    let conn = migrated();
+
+    let note_with_date = conn.execute(
+        "INSERT INTO notes(path, title, title_key, kind, daily_date, file_hash)
+         VALUES('notes/a.md', 'A', 'a', 'note', '2026-07-01', 'h')",
+        [],
+    );
+    assert!(
+        note_with_date.is_err(),
+        "CHECK should reject kind='note' with a daily_date"
+    );
+
+    let daily_without_date = conn.execute(
+        "INSERT INTO notes(path, title, title_key, kind, daily_date, file_hash)
+         VALUES('daily/2026-07-01.md', 'July 1st, 2026', 'july 1st, 2026', 'daily', NULL, 'h')",
+        [],
+    );
+    assert!(
+        daily_without_date.is_err(),
+        "CHECK should reject kind='daily' without a daily_date"
+    );
+
+    let template_with_date = conn.execute(
+        "INSERT INTO notes(path, title, title_key, kind, daily_date, file_hash)
+         VALUES('templates/j.md', 'J', 'j', 'template', '2026-07-01', 'h')",
+        [],
+    );
+    assert!(
+        template_with_date.is_err(),
+        "CHECK should reject kind='template' with a daily_date"
+    );
+
+    // The three shapes buildIndexedNote actually emits all pass.
+    conn.execute_batch(
+        "INSERT INTO notes(path, title, title_key, kind, daily_date, file_hash) VALUES
+           ('daily/2026-07-01.md', 'July 1st, 2026', 'july 1st, 2026', 'daily', '2026-07-01', 'h'),
+           ('notes/a.md', 'A', 'a', 'note', NULL, 'h'),
+           ('templates/j.md', 'J', 'j', 'template', NULL, 'h');",
+    )
+    .expect("consistent rows insert");
+}
+
+#[test]
+fn kind_invariant_migration_wipes_the_projection_for_reindex() {
+    // 0015 drops and recreates `notes` (a table-level CHECK cannot be ADDed)
+    // while six child tables reference it ON DELETE CASCADE. The projection
+    // is wiped children-first (so the DROP's implicit DELETE cascades over
+    // empty tables even with enforcement on) and the next open re-indexes.
+    let mut conn = open_in_memory().expect("open");
+    conn.execute_batch("PRAGMA foreign_keys=ON;").expect("fk");
+    migrate_to(&mut conn, 14).expect("migrate to v14");
+    conn.execute_batch(
+        "INSERT INTO notes(path, title, title_key, kind, daily_date, file_hash) VALUES
+           ('daily/2026-07-01.md', 'July 1st, 2026', 'july 1st, 2026', 'daily', '2026-07-01', 'h1'),
+           ('notes/a.md', 'A', 'a', 'note', NULL, 'h2');
+         INSERT INTO note_text(note_path, text) VALUES('notes/a.md', 'A body');
+         INSERT INTO links(source_path, kind, target_raw, target_key, pos_from, pos_to)
+           VALUES('notes/a.md', 'wiki', 'July 1st, 2026', 'july 1st, 2026', 0, 0);
+         INSERT INTO tags(note_path, tag, tag_key) VALUES('notes/a.md', 'X', 'x');
+         INSERT INTO tasks(note_path, marker_offset, text, raw, checked)
+           VALUES('notes/a.md', 0, 'buy milk', '[ ] buy milk', 0);
+         INSERT INTO search_fts(path, title, body) VALUES('notes/a.md', 'A', 'A body');
+         INSERT INTO index_meta(key, value) VALUES('k', 'v');",
+    )
+    .expect("stage v14 rows");
+
+    migrate(&mut conn).expect("migrate to latest");
+
+    for table in ["notes", "note_text", "links", "tags", "tasks", "search_fts"] {
+        let count: i64 = conn
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "{table} should be wiped for the re-index");
+    }
+    // Bookkeeping outlives the wipe (same contract as index_clear).
+    let meta: i64 = conn
+        .query_row("SELECT count(*) FROM index_meta", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(meta, 1);
+
+    // Every notes index came back with the recreated table.
+    for index in [
+        "notes_title_key",
+        "notes_daily_date",
+        "notes_id",
+        "notes_daily_date_mtime_path",
+        "notes_non_daily_mtime",
+        "notes_pinned",
+        "notes_has_conflict",
+    ] {
+        let exists: bool = conn
+            .prepare("SELECT 1 FROM pragma_index_list('notes') WHERE name = ?1")
+            .unwrap()
+            .exists([index])
+            .unwrap();
+        assert!(exists, "index {index} must be recreated with the table");
+    }
+
+    // The write path, the views, and the child cascades all bind to `notes`
+    // by name — prove they resolve against the recreated table.
+    apply_note(&conn, &note("notes/a.md", "A", vec![wiki("Target")])).unwrap();
+    apply_note(&conn, &note("notes/target.md", "Target", vec![])).unwrap();
+    let backlink_sources: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM backlinks WHERE target_path = 'notes/target.md'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(backlink_sources, 1);
+    conn.execute("DELETE FROM notes WHERE path = 'notes/a.md'", [])
+        .unwrap();
+    let orphans: i64 = conn
+        .query_row("SELECT count(*) FROM links", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        orphans, 0,
+        "ON DELETE CASCADE must target the recreated table"
+    );
+}
+
+#[test]
 fn open_index_at_creates_migrates_and_reopens() {
     let dir = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
@@ -522,7 +801,7 @@ fn open_index_at_creates_migrates_and_reopens() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(version, 13);
+    assert_eq!(version, 16);
     let journal: String = conn
         .query_row("PRAGMA journal_mode", [], |row| row.get(0))
         .unwrap();
@@ -536,6 +815,45 @@ fn open_index_at_creates_migrates_and_reopens() {
     let conn = open_index_at(root).expect("reopen");
     let rows = run_query(&conn, "SELECT count(*) AS n FROM notes", &[]).unwrap();
     assert_eq!(rows[0]["n"], Value::from(1));
+}
+
+/// The note-window adoption contract (`windows::window_bootstrap`): reading
+/// the open sessions must never bump either generation — a bump here would
+/// strand every command the main window has pinned to the current ones.
+#[test]
+fn session_adoption_reads_never_bump_generations() {
+    use tauri::Manager;
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .expect("mock app");
+    app.manage(crate::fs::GraphState::default());
+    app.manage(super::IndexState::default());
+
+    let graph_dir = tempfile::tempdir().expect("tempdir");
+    {
+        let state: tauri::State<crate::fs::GraphState> = app.state();
+        let mut inner = state.0.lock().unwrap();
+        inner.generation = 3;
+        inner.root = Some(graph_dir.path().to_path_buf());
+    }
+
+    // Before any index opens, adoption reports that honestly (None), rather
+    // than opening one itself.
+    assert_eq!(super::current_generation(&app.state()).unwrap(), None);
+
+    let opened = super::index_open(app.state(), app.state()).expect("open");
+    for _ in 0..2 {
+        let info = crate::fs::current_graph_info(&app.state()).expect("graph info");
+        assert_eq!(info.generation, 3);
+        assert_eq!(
+            super::current_generation(&app.state()).unwrap(),
+            Some(opened)
+        );
+    }
+
+    // Both counters sit exactly where the main window left them.
+    let graph: tauri::State<crate::fs::GraphState> = app.state();
+    assert_eq!(graph.0.lock().unwrap().generation, 3);
 }
 
 /// Command-level integration: the generation gate that every TS write relies on.
@@ -569,22 +887,44 @@ fn stale_generation_writes_are_dropped_end_to_end() {
     };
 
     let stale = super::index_open(app.state(), app.state()).expect("first open");
-    super::index_apply(note("notes/a.md", "A", vec![]), stale, app.state()).expect("apply");
+    super::index_apply(
+        note("notes/a.md", "A", vec![]),
+        stale,
+        app.handle().clone(),
+        app.state(),
+    )
+    .expect("apply");
     assert_eq!(count("after first apply"), Value::from(1));
 
     // Reopening (graph switch / reload) bumps the generation; the old one is stale.
     let fresh = super::index_open(app.state(), app.state()).expect("reopen");
     assert_ne!(stale, fresh);
 
-    super::index_apply(note("notes/b.md", "B", vec![]), stale, app.state())
-        .expect("stale apply returns Ok");
+    super::index_apply(
+        note("notes/b.md", "B", vec![]),
+        stale,
+        app.handle().clone(),
+        app.state(),
+    )
+    .expect("stale apply returns Ok");
     assert_eq!(count("after stale apply"), Value::from(1)); // dropped, not applied
 
-    super::index_remove("notes/a.md".to_string(), stale, app.state())
-        .expect("stale remove returns Ok");
+    super::index_remove(
+        "notes/a.md".to_string(),
+        stale,
+        app.handle().clone(),
+        app.state(),
+    )
+    .expect("stale remove returns Ok");
     assert_eq!(count("after stale remove"), Value::from(1)); // also dropped
 
-    super::index_apply(note("notes/b.md", "B", vec![]), fresh, app.state()).expect("fresh apply");
+    super::index_apply(
+        note("notes/b.md", "B", vec![]),
+        fresh,
+        app.handle().clone(),
+        app.state(),
+    )
+    .expect("fresh apply");
     assert_eq!(count("after fresh apply"), Value::from(2));
 
     // index_meta_set rides the same gate: stale stamps vanish, fresh ones land

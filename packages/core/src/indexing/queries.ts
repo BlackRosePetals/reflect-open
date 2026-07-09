@@ -1,185 +1,33 @@
 import type { Database } from '@reflect/db'
 import { sql, type Selectable } from 'kysely'
-import { readNote } from '../graph/commands'
 import {
+  foldEmail,
   foldKey,
   foldTag,
-  normalizeWikiTarget,
   resolveWikiLinkAsync,
   type Resolution,
-  type TaskMarker,
 } from '../markdown'
-import { generateDateSuggestions, type DateSuggestionContext } from './date-suggestions'
 import { db } from './db'
+import { inClauseChunks } from './query-utils'
 import { buildFtsMatch } from './search-query'
-import { lineAt } from './snippet'
-import {
-  mergeDateSuggestions,
-  rankWikiSuggestions,
-  type AliasCandidate,
-  type TitleCandidate,
-  type WikiSuggestion,
-} from './suggest'
+export {
+  getBacklinks,
+  getBacklinksWithContext,
+  type Backlink,
+  type BacklinkContext,
+} from './queries-backlinks'
+export { getCompletedTasks, getOpenTasks, type OpenTask } from './queries-tasks'
+export {
+  suggestTags,
+  suggestWikiTargets,
+  type TagSuggestion,
+} from './queries-suggestions'
 
 /**
  * Index read getters (Plan 04). Queries are built with Kysely and execute over
  * the IPC bridge (`@reflect/db`). Rows are our own projection — trusted, not
  * re-validated per row (see Plan 04 §2).
  */
-
-export type Backlink = Pick<
-  Selectable<Database['backlinks']>,
-  'sourcePath' | 'targetRaw' | 'alias' | 'posFrom' | 'posTo'
->
-
-/** Notes that link to `path` (resolved at query time via the `backlinks` view). */
-export function getBacklinks(path: string): Promise<Backlink[]> {
-  return db
-    .selectFrom('backlinks')
-    .where('targetPath', '=', path)
-    .select(['sourcePath', 'targetRaw', 'alias', 'posFrom', 'posTo'])
-    .orderBy('sourcePath')
-    .execute()
-}
-
-/** One backlink with the context the panel renders (Plan 07). */
-export interface BacklinkContext {
-  sourcePath: string
-  sourceTitle: string
-  /**
-   * The whole source line containing the link, as rich-text-renderable Markdown
-   * (empty when the file is unreadable). Not windowed: a half-cut Markdown token
-   * would garble the rendered snippet, so the panel clamps the line visually.
-   */
-  snippet: string
-  posFrom: number
-}
-
-/**
- * Backlinks of `path` with source titles and line snippets. One read per
- * distinct source; a source that vanished between query and read keeps its row
- * with an empty snippet (the index lags deletes only briefly).
- */
-export async function getBacklinksWithContext(path: string): Promise<BacklinkContext[]> {
-  const rows = await db
-    .selectFrom('backlinks')
-    .innerJoin('notes', 'notes.path', 'backlinks.sourcePath')
-    .where('targetPath', '=', path)
-    .select(['backlinks.sourcePath', 'backlinks.posFrom', 'notes.title as sourceTitle'])
-    // The view's generated types are nullable (SQLite views lose NOT NULL),
-    // but these columns come from NOT NULL `links` columns via an inner join.
-    .$narrowType<{ sourcePath: string; posFrom: number }>()
-    .orderBy('notes.title')
-    .orderBy('backlinks.sourcePath')
-    .orderBy('backlinks.posFrom')
-    .execute()
-
-  const contents = new Map<string, string | null>()
-  await Promise.all(
-    [...new Set(rows.map((row) => row.sourcePath))].map(async (sourcePath) => {
-      try {
-        contents.set(sourcePath, await readNote(sourcePath))
-      } catch {
-        contents.set(sourcePath, null)
-      }
-    }),
-  )
-
-  return rows.map((row) => {
-    const content = contents.get(row.sourcePath)
-    return {
-      sourcePath: row.sourcePath,
-      sourceTitle: row.sourceTitle,
-      snippet: content == null ? '' : lineAt(content, row.posFrom),
-      posFrom: row.posFrom,
-    }
-  })
-}
-
-/**
- * One open task plus the note context the Tasks view (Plan 18) groups and
- * renders by. The view buckets Current/Overdue/Upcoming off the task's
- * `dueDate` when it has one, else the source note's `dailyDate`;
- * `isPinned`/`pinnedOrder`/`updatedAt` order the per-note groups for tasks in
- * regular (dateless) notes.
- */
-export interface OpenTask extends TaskMarker {
-  notePath: string
-  /** Whether the checkbox is ticked. Open lists are all `false`; the Tasks view's
-   * "show archived" surfaces completed rows where this is `true`. */
-  checked: boolean
-  /** Display text, markdown stripped. */
-  text: string
-  noteTitle: string
-  /** The task's explicit `[[YYYY-MM-DD]]` due date, or null — drives Overdue (V1). */
-  dueDate: string | null
-  /** ISO date for daily-note tasks; null for tasks in regular notes. */
-  dailyDate: string | null
-  /** Pin flag mapped to a real boolean at the read boundary (SQLite stores `0|1`). */
-  isPinned: boolean
-  pinnedOrder: number | null
-  updatedAt: number
-}
-
-/** Task rows joined to their note context — the shared shape both task reads select. */
-function taskRowsQuery() {
-  return db
-    .selectFrom('tasks')
-    .innerJoin('notes', 'notes.path', 'tasks.notePath')
-    .select([
-      'tasks.notePath',
-      'tasks.markerOffset',
-      'tasks.raw',
-      'tasks.text',
-      'tasks.checked',
-      'tasks.dueDate',
-      'notes.title as noteTitle',
-      'notes.dailyDate',
-      'notes.isPinned',
-      'notes.pinnedOrder',
-      'notes.updatedAt',
-    ])
-}
-
-/** Map the SQLite `0|1` flags to real booleans at the read boundary, like the
- * other note getters — so `groupTasks` and the view see booleans, not integers. */
-function toTaskRow(row: {
-  checked: number
-  isPinned: number
-}): { checked: boolean; isPinned: boolean } {
-  return { ...row, checked: row.checked !== 0, isPinned: row.isPinned !== 0 }
-}
-
-/**
- * Every open checkbox across the graph, with note context, for the Tasks view.
- * `private: true` notes' tasks **are** included: the Tasks view is a local-only
- * surface that never sends content anywhere — exactly like local search and the
- * daily stream — so the `private` hard-block (content never leaves the device)
- * is unaffected. The ordering here is only for a deterministic result; the final
- * grouping and sort live in {@link groupTasks}, so this read just gathers the rows.
- */
-export async function getOpenTasks(): Promise<OpenTask[]> {
-  const rows = await taskRowsQuery()
-    .where('tasks.checked', '=', 0)
-    .orderBy('tasks.notePath')
-    .orderBy('tasks.markerOffset')
-    .execute()
-  return rows.map((row) => ({ ...row, ...toTaskRow(row) }))
-}
-
-/**
- * Completed checkboxes across the graph, most-recently-edited note first — the
- * Tasks view's "show archived" surface. Same shape as {@link getOpenTasks}, so
- * the view groups and renders both the same way (completed rows struck through).
- */
-export async function getCompletedTasks(): Promise<OpenTask[]> {
-  const rows = await taskRowsQuery()
-    .where('tasks.checked', '=', 1)
-    .orderBy('notes.updatedAt', 'desc')
-    .orderBy('tasks.markerOffset')
-    .execute()
-  return rows.map((row) => ({ ...row, ...toTaskRow(row) }))
-}
 
 /** Distinct source paths of links whose folded target key is `targetKey`. */
 export async function getLinkSources(targetKey: string): Promise<string[]> {
@@ -193,121 +41,12 @@ export async function getLinkSources(targetKey: string): Promise<string[]> {
   return rows.map((row) => row.sourcePath)
 }
 
-/** Escape `%`/`_`/`\` so user text can't act as LIKE wildcards. */
-function likeContains(key: string): string {
-  return `%${key.replaceAll(/[\\%_]/g, (match) => `\\${match}`)}%`
-}
-
-/** One `#tag` autocomplete candidate: display casing + how many notes carry it. */
-export interface TagSuggestion {
-  tag: string
-  count: number
-}
-
-/**
- * `#` autocomplete candidates for `query` (Plan 18): tags whose folded key
- * contains the query, most-used first, deduped on the stored `tag_key` so
- * `#Book`/`#book` are one row with one deterministic casing. An empty query
- * suggests the most-used tags. Mirrors how {@link suggestWikiTargets} feeds the
- * `[[` menu — the host ranks, the editor's menu does not re-sort.
- */
-export async function suggestTags(query: string, limit = 8): Promise<TagSuggestion[]> {
-  const key = foldTag(query.trim())
-  let candidates = db
-    .selectFrom('tags')
-    .select([sql<string>`min(tags.tag)`.as('tag'), sql<number>`count(*)`.as('count')])
-    .groupBy('tags.tagKey')
-    .orderBy(sql`count(*)`, 'desc')
-    .orderBy(sql`min(tags.tag)`)
-    .limit(limit)
-  if (key !== '') {
-    candidates = candidates.where(sql<boolean>`tag_key LIKE ${likeContains(key)} ESCAPE '\\'`)
-  }
-  const rows = await candidates.execute()
-  return rows.map((row) => ({ tag: row.tag, count: Number(row.count) }))
-}
-
-/**
- * `[[` autocomplete candidates for `query` (Plan 07): title and alias contains-
- * matches ranked by {@link rankWikiSuggestions} (exact < prefix < substring,
- * titles before aliases, recent first); an empty query suggests recent notes.
- * A full `YYYY-MM-DD` query always yields that daily as the first candidate —
- * dailies are valid targets before their file exists (created lazily on write).
- *
- * Pass `dateGen` (the clock + date-format preference) to also synthesise
- * date suggestions from fuzzy queries — "3 days ago", "next friday", "12/25",
- * "December 2nd" — via {@link generateDateSuggestions}, merged ahead of the
- * index matches. Omit it (e.g. legacy callers) to keep the plain title/alias
- * behaviour with only the full-ISO daily injection.
- */
-export async function suggestWikiTargets(
-  query: string,
-  limit = 8,
-  dateGen?: DateSuggestionContext,
-): Promise<WikiSuggestion[]> {
-  const normalized = normalizeWikiTarget(query)
-  const key = normalized.key
-
-  let titleQuery = db
-    .selectFrom('notes')
-    .select(['path', 'title', 'titleKey', 'dailyDate', 'mtime'])
-    .orderBy('mtime', 'desc')
-    .limit(50)
-  if (key !== '') {
-    titleQuery = titleQuery.where(
-      sql<boolean>`title_key LIKE ${likeContains(key)} ESCAPE '\\'`,
-    )
-  }
-  const titles: TitleCandidate[] = await titleQuery.execute()
-
-  let aliases: AliasCandidate[] = []
-  if (key !== '') {
-    aliases = await db
-      .selectFrom('aliases')
-      .innerJoin('notes', 'notes.path', 'aliases.notePath')
-      .where(sql<boolean>`alias_key LIKE ${likeContains(key)} ESCAPE '\\'`)
-      .select([
-        'notes.path',
-        'notes.title',
-        'notes.titleKey',
-        'notes.dailyDate',
-        'notes.mtime',
-        'aliases.alias',
-        'aliases.aliasKey',
-      ])
-      .orderBy('notes.mtime', 'desc')
-      .limit(50)
-      .execute()
-  }
-
-  const ranked = rankWikiSuggestions(key, titles, aliases, limit)
-
-  // With a clock, the generator covers the full-ISO daily too (and more), so it
-  // supersedes the bare injection below.
-  if (dateGen !== undefined) {
-    return mergeDateSuggestions(ranked, generateDateSuggestions(query, dateGen), { key, limit })
-  }
-
-  if (normalized.date !== undefined) {
-    const date = normalized.date
-    const existing = ranked.find((suggestion) => suggestion.date === date)
-    const daily: WikiSuggestion = existing ?? {
-      target: date,
-      path: null,
-      title: date,
-      alias: null,
-      date,
-    }
-    return [daily, ...ranked.filter((suggestion) => suggestion !== existing)].slice(0, limit)
-  }
-  return ranked
-}
-
 /** One pinned note, as the sidebar's Pinned section lists it. */
 export interface PinnedNote {
   path: string
   title: string
   dailyDate: string | null
+  pinnedOrder?: number | null
 }
 
 /**
@@ -320,7 +59,8 @@ export async function getPinnedNotes(): Promise<PinnedNote[]> {
   return db
     .selectFrom('notes')
     .where('isPinned', '=', 1)
-    .select(['path', 'title', 'dailyDate'])
+    .where('kind', '!=', 'template')
+    .select(['path', 'title', 'dailyDate', 'pinnedOrder'])
     .orderBy(sql`pinned_order IS NULL`)
     .orderBy('pinnedOrder')
     .orderBy('titleKey')
@@ -379,23 +119,6 @@ export async function getConflictedNotes(): Promise<ConflictedNote[]> {
     .select(['path', 'title'])
     .orderBy('path')
     .execute()
-}
-
-/**
- * Bound variables per `IN (…)` clause. SQLite caps variables per statement
- * (999 on older builds), and callers like the reconcile pass can legitimately
- * present thousands of paths after a mass external move — chunking keeps
- * every statement comfortably inside the budget.
- */
-const IN_CLAUSE_LIMIT = 500
-
-/** Split `values` into `IN`-clause-sized chunks (no chunks for no values). */
-function inClauseChunks<Value>(values: readonly Value[]): Value[][] {
-  const chunks: Value[][] = []
-  for (let start = 0; start < values.length; start += IN_CLAUSE_LIMIT) {
-    chunks.push(values.slice(start, start + IN_CLAUSE_LIMIT))
-  }
-  return chunks
 }
 
 /** Notes sharing one frontmatter `id` — a sync fork (Plan 17). */
@@ -505,7 +228,9 @@ export async function listDailyNotes(range: DailyNotesRange): Promise<DailyNoteR
 export async function getNotesByTag(tag: string): Promise<string[]> {
   const rows = await db
     .selectFrom('tags')
+    .innerJoin('notes', 'notes.path', 'tags.notePath')
     .where('tagKey', '=', foldTag(tag))
+    .where('notes.kind', '!=', 'template')
     .select('notePath')
     .orderBy('notePath')
     .execute()
@@ -543,6 +268,7 @@ export async function searchNotes(query: string, limit = 50): Promise<SearchHit[
   return db
     .selectFrom('searchFts')
     .innerJoin('notes', 'notes.path', 'searchFts.path')
+    .where('notes.kind', '!=', 'template')
     .select(['searchFts.path', 'searchFts.title'])
     .where(sql<boolean>`search_fts MATCH ${match}`)
     .orderBy(sql`case when "notes"."title_key" = ${titleKey} then 0 else 1 end`)
@@ -554,14 +280,46 @@ export async function searchNotes(query: string, limit = 50): Promise<SearchHit[
     .execute()
 }
 
+/** What a pass knows about an indexed note without reading its file. */
+export interface IndexedFileFacts {
+  /** Content hash the row was built from — the authority for "changed". */
+  readonly fileHash: string
+  /** The mtime stamped on the row — lets a pass skip reading untouched files. */
+  readonly mtime: number
+}
+
 /**
- * Stored `path → fileHash` map, for content-hash reconciliation on open. Loads
- * every note's hash into memory — fine at first-wave graph sizes; revisit with a
- * streamed/keyset scan if graphs grow large (tracked with the Plan 04b watcher).
+ * Stored `path → {fileHash, mtime}` map, for reconciliation on open. Loads
+ * every note's facts into memory — fine at first-wave graph sizes; revisit with
+ * a streamed/keyset scan if graphs grow large (tracked with the Plan 04b
+ * watcher).
  */
-export async function getIndexedHashes(): Promise<Map<string, string>> {
-  const rows = await db.selectFrom('notes').select(['path', 'fileHash']).execute()
-  return new Map(rows.map((row) => [row.path, row.fileHash]))
+export async function getIndexedFileFacts(): Promise<Map<string, IndexedFileFacts>> {
+  const rows = await db.selectFrom('notes').select(['path', 'fileHash', 'mtime']).execute()
+  return new Map(rows.map((row) => [row.path, { fileHash: row.fileHash, mtime: row.mtime }]))
+}
+
+/**
+ * {@link getIndexedFileFacts} for a specific path set — the live watcher-batch
+ * variant, so applying a large `index:changed` batch (e.g. the metadata
+ * query's initial gather) can skip already-indexed files without a full-table
+ * load. Chunked past SQLite's bound-variable budget.
+ */
+export async function getIndexedFileFactsByPath(
+  paths: string[],
+): Promise<Map<string, IndexedFileFacts>> {
+  const facts = new Map<string, IndexedFileFacts>()
+  for (const chunk of inClauseChunks(paths)) {
+    const rows = await db
+      .selectFrom('notes')
+      .where('path', 'in', chunk)
+      .select(['path', 'fileHash', 'mtime'])
+      .execute()
+    for (const row of rows) {
+      facts.set(row.path, { fileHash: row.fileHash, mtime: row.mtime })
+    }
+  }
+  return facts
 }
 
 /**
@@ -586,6 +344,36 @@ export async function getNoteIdsByPath(paths: string[]): Promise<Map<string, str
   return ids
 }
 
+/** The folded tag key marking person notes (`- Type: #person`, v1's typing). */
+const PERSON_TAG_KEY = 'person'
+
+/**
+ * The title of the note that owns `email` through a `- Email:` contact-field
+ * bullet (the `note_emails` projection), or null. Only `#person`-tagged
+ * regular notes qualify: a daily note, template, or non-person note quoting
+ * an address must never become a `[[Person]]` link target — the projection
+ * records every field bullet, and this query is where the ownership policy
+ * lives. Several notes claiming one address resolve to the first path
+ * alphabetically, the resolver's rule everywhere else.
+ */
+export async function noteTitleOwningEmail(email: string): Promise<string | null> {
+  const key = foldEmail(email)
+  if (key === '') {
+    return null
+  }
+  const owner = await db
+    .selectFrom('noteEmails')
+    .innerJoin('notes', 'notes.path', 'noteEmails.notePath')
+    .innerJoin('tags', 'tags.notePath', 'notes.path')
+    .where('noteEmails.emailKey', '=', key)
+    .where('tags.tagKey', '=', PERSON_TAG_KEY)
+    .where('notes.kind', '=', 'note')
+    .select('notes.title as title')
+    .orderBy('notes.path')
+    .executeTakeFirst()
+  return owner?.title ?? null
+}
+
 /**
  * Resolve a `[[target]]` against the index, returning the note ref (its path).
  * The resolution *policy* (prefer daily-date, then title, then alias) lives once
@@ -596,6 +384,8 @@ export async function getNoteIdsByPath(paths: string[]): Promise<Map<string, str
  * undefined).
  */
 export function resolveWikiTarget(target: string): Promise<Resolution> {
+  // Templates are excluded from every lookup, mirroring the `note_keys` view:
+  // a `[[target]]` must never resolve to a template.
   return resolveWikiLinkAsync(target, {
     byDate: async (date) =>
       (
@@ -611,6 +401,7 @@ export function resolveWikiTarget(target: string): Promise<Resolution> {
         await db
           .selectFrom('notes')
           .where('titleKey', '=', key)
+          .where('kind', '!=', 'template')
           .select('path')
           .orderBy('path')
           .executeTakeFirst()
@@ -619,7 +410,9 @@ export function resolveWikiTarget(target: string): Promise<Resolution> {
       (
         await db
           .selectFrom('aliases')
+          .innerJoin('notes', 'notes.path', 'aliases.notePath')
           .where('aliasKey', '=', key)
+          .where('notes.kind', '!=', 'template')
           .select('notePath')
           .orderBy('notePath')
           .executeTakeFirst()

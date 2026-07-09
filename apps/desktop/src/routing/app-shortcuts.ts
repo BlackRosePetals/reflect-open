@@ -12,6 +12,7 @@ import { useAudioMemo } from '@/providers/audio-memo-provider'
 import { useChatSession } from '@/providers/chat-provider'
 import { useFocusedDailyDate } from '@/providers/focused-daily-provider'
 import { useGraph } from '@/providers/graph-provider'
+import { useNoteTemplates } from '@/providers/note-templates-provider'
 import { useSettings } from '@/providers/settings-provider'
 import { useShortcuts } from '@/providers/shortcuts-provider'
 import { useSidebar } from '@/providers/sidebar-provider'
@@ -37,9 +38,100 @@ export const APP_BINDINGS = registerKeymap(
 )
 
 const BINDING_TO_ID = new Map(BOUND_COMMANDS.map(({ binding, command }) => [binding, command.id]))
+const HISTORY_COMMAND_IDS = new Set(['history.back', 'history.forward'])
 
-function isModKey(event: KeyboardEvent): boolean {
-  return event.metaKey || event.ctrlKey
+const CODE_TO_BINDING_KEY: Record<string, string> = {
+  BracketLeft: '[',
+  BracketRight: ']',
+}
+
+interface BindingKeyLookup {
+  key: string
+  shift: boolean
+}
+
+function bindingKeyFor(event: KeyboardEvent): string {
+  if (!event.altKey && event.key.length === 1) {
+    return event.key.toLowerCase()
+  }
+  const fromCode = CODE_TO_BINDING_KEY[event.code]
+  if (fromCode !== undefined) {
+    return fromCode
+  }
+  // Alt rewrites `event.key` on macOS (⌥L reports "Ò"), so alt chords match
+  // letters and digits by physical code instead.
+  if (event.altKey) {
+    const code = /^(?:Key([A-Z])|Digit([0-9]))$/.exec(event.code)
+    if (code !== null) {
+      return (code[1] ?? code[2] ?? '').toLowerCase()
+    }
+  }
+  return event.key.toLowerCase()
+}
+
+function physicalDigitKeyFor(event: KeyboardEvent): string | null {
+  if (event.altKey) {
+    return null
+  }
+  const match = /^Digit([0-9])$/.exec(event.code)
+  if (match === null) {
+    return null
+  }
+  const digit = match[1]!
+  // Some layouts type number-row digits with Shift. Treat that as the same
+  // graph-switch shortcut, but don't make US-style Cmd+Shift+@ mean Cmd+2.
+  if (event.shiftKey && event.key !== digit) {
+    return null
+  }
+  return digit
+}
+
+function addBindingLookup(lookups: BindingKeyLookup[], lookup: BindingKeyLookup): void {
+  if (lookups.some((existing) => existing.key === lookup.key && existing.shift === lookup.shift)) {
+    return
+  }
+  lookups.push(lookup)
+}
+
+function bindingLookupsFor(event: KeyboardEvent): BindingKeyLookup[] {
+  const lookups: BindingKeyLookup[] = []
+  addBindingLookup(lookups, { key: bindingKeyFor(event), shift: event.shiftKey })
+
+  const digit = physicalDigitKeyFor(event)
+  if (digit !== null) {
+    addBindingLookup(lookups, { key: digit, shift: false })
+  }
+
+  return lookups
+}
+
+function modifierPrefixesFor(event: KeyboardEvent): string[] {
+  const alt = event.altKey ? 'Alt-' : ''
+  return [
+    event.metaKey ? `${alt}Meta-` : null,
+    event.ctrlKey ? `${alt}Ctrl-` : null,
+    `${alt}Mod-`,
+  ].filter((prefix): prefix is string => prefix !== null)
+}
+
+function idForKeyDown(event: KeyboardEvent): string | null {
+  if ((!event.metaKey && !event.ctrlKey) || event.repeat) {
+    return null // held keys must not spam navigations (e.g. a stack of new notes)
+  }
+  for (const { key, shift: shifted } of bindingLookupsFor(event)) {
+    const shift = shifted ? 'Shift-' : ''
+    for (const prefix of modifierPrefixesFor(event)) {
+      // Alt participates in the lookup rather than being rejected, so
+      // `Alt-Mod-l` can bind while an alt chord still never fires a plain
+      // `Mod-` command.
+      const candidate = `${prefix}${shift}${key}`
+      const id = BINDING_TO_ID.get(candidate)
+      if (id !== undefined) {
+        return id
+      }
+    }
+  }
+  return null
 }
 
 /**
@@ -50,12 +142,18 @@ function isModKey(event: KeyboardEvent): boolean {
  * mounted (`setMenuCommandDispatch`).
  */
 export function useAppShortcuts(): CommandContext {
-  const { route, navigate, back, forward } = useRouter()
+  const { route, navigate, back, forward, clearScrollState } = useRouter()
   const focusedDailyDate = useFocusedDailyDate()
   const { resolvedTheme, setTheme } = useTheme()
-  const { graph } = useGraph()
+  const { graph, recents, openRecent } = useGraph()
   const { openPalette, open: paletteOpen } = usePalette()
   const { openShortcuts, closeShortcuts, open: shortcutsOpen } = useShortcuts()
+  const {
+    openTemplatePicker,
+    openTemplateCreate,
+    pickerOpen: templatePickerOpen,
+    createOpen: templateCreateOpen,
+  } = useNoteTemplates()
   const { toggleSidebar } = useSidebar()
   const { toggle: toggleAudioMemo } = useAudioMemo()
   const { newChat } = useChatSession()
@@ -68,15 +166,26 @@ export function useAppShortcuts(): CommandContext {
   // Same for the ⌘/ cheat-sheet, except ⌘/ itself toggles it closed.
   const shortcutsOpenRef = useRef(shortcutsOpen)
 
+  // And for the template dialogs — both are Radix modals; nothing may
+  // navigate behind them.
+  const templatesOpenRef = useRef(templatePickerOpen || templateCreateOpen)
+
   // Read at run time, not captured: a command can fire long after the render
   // that created the context (palette open across an index rebuild, etc.).
   const generationRef = useRef<number | null>(graph?.generation ?? null)
+  const graphRootRef = useRef<string | null>(graph?.root ?? null)
+  const recentsRef = useRef(recents)
+  const openRecentRef = useRef(openRecent)
   const routeRef = useRef(route)
   const focusedDailyDateRef = useRef(focusedDailyDate)
   useEffect(() => {
     paletteOpenRef.current = paletteOpen
     shortcutsOpenRef.current = shortcutsOpen
+    templatesOpenRef.current = templatePickerOpen || templateCreateOpen
     generationRef.current = graph?.generation ?? null
+    graphRootRef.current = graph?.root ?? null
+    recentsRef.current = recents
+    openRecentRef.current = openRecent
     routeRef.current = route
     focusedDailyDateRef.current = focusedDailyDate
   })
@@ -96,13 +205,23 @@ export function useAppShortcuts(): CommandContext {
       },
       back,
       forward,
+      clearScrollState,
       toggleTheme: () => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark'),
       toggleSidebar,
       newChat,
+      switchGraph: (index) => {
+        const recent = recentsRef.current[index]
+        if (recent === undefined || recent.root === graphRootRef.current) {
+          return
+        }
+        void openRecentRef.current(recent.root)
+      },
       toggleAudioMemo,
       generation: () => generationRef.current,
       openPalette,
       openShortcuts,
+      openTemplatePicker,
+      openTemplateCreate,
       enableSemanticSearch: () => {
         updateSettings({ semanticSearchEnabled: true })
         // EmbeddingsSync loads an untouched runtime; a `failed` one only
@@ -114,10 +233,13 @@ export function useAppShortcuts(): CommandContext {
       navigate,
       back,
       forward,
+      clearScrollState,
       resolvedTheme,
       setTheme,
       openPalette,
       openShortcuts,
+      openTemplatePicker,
+      openTemplateCreate,
       toggleSidebar,
       newChat,
       toggleAudioMemo,
@@ -141,8 +263,23 @@ export function useAppShortcuts(): CommandContext {
         }
         return false
       }
+      if (templatesOpenRef.current) {
+        return false // the template picker/create dialogs are modal too
+      }
       void runCommand(id, context)
       return true
+    }
+
+    function onHistoryKeyDownCapture(event: KeyboardEvent) {
+      const id = idForKeyDown(event)
+      if (id === null || !HISTORY_COMMAND_IDS.has(id)) {
+        return
+      }
+      if (triggerCommand(id)) {
+        // History navigation is app chrome, so it wins even when the focused
+        // editor would otherwise consume the bracket chord while bubbling.
+        event.preventDefault()
+      }
     }
 
     function onKeyDown(event: KeyboardEvent) {
@@ -153,14 +290,8 @@ export function useAppShortcuts(): CommandContext {
         // has nothing to do it leaves the event alone and `Mod-k` falls through.
         return
       }
-      if (!isModKey(event) || event.altKey || event.repeat) {
-        return // held keys must not spam navigations (e.g. a stack of new notes)
-      }
-      const bindingKey = event.shiftKey
-        ? `Mod-Shift-${event.key.toLowerCase()}`
-        : `Mod-${event.key.toLowerCase()}`
-      const id = BINDING_TO_ID.get(bindingKey)
-      if (id === undefined) {
+      const id = idForKeyDown(event)
+      if (id === null) {
         return
       }
       if (triggerCommand(id)) {
@@ -171,9 +302,11 @@ export function useAppShortcuts(): CommandContext {
     }
 
     setMenuCommandDispatch(triggerCommand)
+    window.addEventListener('keydown', onHistoryKeyDownCapture, true)
     window.addEventListener('keydown', onKeyDown)
     return () => {
       setMenuCommandDispatch(null)
+      window.removeEventListener('keydown', onHistoryKeyDownCapture, true)
       window.removeEventListener('keydown', onKeyDown)
     }
   }, [context, closeShortcuts])

@@ -3,6 +3,9 @@ import {
   captureAckSchema,
   captureEnvelopeSchema,
   captureWireMessageSchema,
+  inboxEnvelopeSchema,
+  textCaptureEnvelopeSchema,
+  TEXT_CAPTURE_MAX_LENGTH,
 } from './capture-envelope'
 
 const VALID = {
@@ -28,6 +31,15 @@ describe('captureEnvelopeSchema', () => {
       screenshotRef: `${VALID.id}.jpg`,
     }
     expect(captureEnvelopeSchema.parse(full)).toEqual(full)
+  })
+
+  it('accepts an iOS share capture with its in-page meta description', () => {
+    const shared = {
+      ...VALID,
+      source: 'ios-share',
+      metaDescription: 'A page about examples.',
+    }
+    expect(captureEnvelopeSchema.parse(shared)).toEqual(shared)
   })
 
   it('accepts an offset timestamp', () => {
@@ -83,5 +95,74 @@ describe('captureAckSchema', () => {
       message: 'open Reflect and pick a graph first',
     })
     expect(parsed.success).toBe(true)
+  })
+})
+
+const VALID_TEXT = {
+  version: 1,
+  id: 'a1b2c3d4-0000-4000-8000-000000000001',
+  kind: 'append',
+  text: 'call the bank',
+  capturedAt: '2026-06-12T15:30:22.845Z',
+  source: 'deep-link',
+}
+
+describe('textCaptureEnvelopeSchema', () => {
+  it('accepts both capture kinds', () => {
+    expect(textCaptureEnvelopeSchema.parse(VALID_TEXT)).toEqual(VALID_TEXT)
+    expect(
+      textCaptureEnvelopeSchema.safeParse({ ...VALID_TEXT, kind: 'task' }).success,
+    ).toBe(true)
+  })
+
+  it('accepts the iOS share sheet as a text producer', () => {
+    expect(
+      textCaptureEnvelopeSchema.safeParse({ ...VALID_TEXT, source: 'ios-share' }).success,
+    ).toBe(true)
+  })
+
+  it.each([
+    ['empty text', { ...VALID_TEXT, text: '' }],
+    ['whitespace-only text', { ...VALID_TEXT, text: '  \t ' }],
+    ['multi-line text', { ...VALID_TEXT, text: 'one\ntwo' }],
+    ['over-cap text', { ...VALID_TEXT, text: 'a'.repeat(TEXT_CAPTURE_MAX_LENGTH + 1) }],
+    ['unknown kind', { ...VALID_TEXT, kind: 'note' }],
+    ['unknown source', { ...VALID_TEXT, source: 'carrier-pigeon' }],
+    ['non-uuid id', { ...VALID_TEXT, id: 'nope' }],
+  ])('rejects %s', (_label, candidate) => {
+    expect(textCaptureEnvelopeSchema.safeParse(candidate).success).toBe(false)
+  })
+})
+
+describe('inboxEnvelopeSchema', () => {
+  it('dispatches on shape: `kind` makes a text envelope, its absence a link one', () => {
+    expect(inboxEnvelopeSchema.parse(VALID)).toEqual(VALID)
+    expect(inboxEnvelopeSchema.parse(VALID_TEXT)).toEqual(VALID_TEXT)
+  })
+
+  it('rejects a hybrid that satisfies neither shape fully', () => {
+    expect(inboxEnvelopeSchema.safeParse({ ...VALID_TEXT, kind: undefined }).success).toBe(false)
+  })
+
+  // Literal producer output from the iOS share extension's Swift structs
+  // (`gen/apple/ShareExtension/CaptureInbox.swift` — JSONEncoder, lowercased
+  // UUID, ISO-8601 with fractional seconds). The Swift side has no test
+  // harness, so this is what pins the third producer to the zod contract;
+  // update BOTH sides together.
+  it('accepts the Swift producer shapes verbatim', () => {
+    const swiftLink = JSON.parse(
+      '{"capturedAt":"2026-07-05T07:12:30.123Z","id":"7c9e6679-7425-40de-944b-e07fc1f90ae7",' +
+        '"metaDescription":"A page about examples.","selection":"quoted text",' +
+        '"source":"ios-share","title":"An article","url":"https://example.com/article","version":1}',
+    ) as unknown
+    const swiftText = JSON.parse(
+      '{"capturedAt":"2026-07-05T07:12:30.123Z","id":"7c9e6679-7425-40de-944b-e07fc1f90ae7",' +
+        '"kind":"append","source":"ios-share","text":"call the bank","version":1}',
+    ) as unknown
+
+    const link = inboxEnvelopeSchema.parse(swiftLink)
+    expect('kind' in link).toBe(false)
+    const text = inboxEnvelopeSchema.parse(swiftText)
+    expect('kind' in text && text.kind).toBe('append')
   })
 })

@@ -44,7 +44,7 @@ vi.mock('@/providers/settings-provider', () => ({
   }),
 }))
 vi.mock('@/providers/graph-provider', () => ({
-  useGraph: () => ({ graph: { root: '/g', name: 'g', cloudSync: null, generation: 1 } }),
+  useGraph: () => ({ graph: { root: '/g', name: 'g', generation: 1 } }),
 }))
 // Register after the core mock is installed so commands see the mocked graph.
 const { registerAppCommands } = await import('@/lib/commands/app-commands')
@@ -86,13 +86,17 @@ function renderPalette(query: string, context?: Partial<CommandContext>) {
     notePath: () => null,
     back: vi.fn(),
     forward: vi.fn(),
+    clearScrollState: vi.fn(),
     toggleTheme: vi.fn(),
     toggleSidebar: vi.fn(),
     newChat: vi.fn(),
+    switchGraph: vi.fn(),
     toggleAudioMemo: vi.fn(),
     generation: () => 1,
     openPalette: vi.fn(),
     openShortcuts: vi.fn(),
+    openTemplatePicker: vi.fn(),
+    openTemplateCreate: vi.fn(),
     enableSemanticSearch: vi.fn(),
     ...context,
   }

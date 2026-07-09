@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { OpenTask } from '@reflect/core'
 import { useEffect, useState, type MutableRefObject, type ReactNode } from 'react'
+import { INDEX_QUERY_SCOPE } from '@/lib/query-client'
 import { resetRecentlyCompleted } from '@/lib/tasks/recently-completed'
 import { RouterProvider, useRouter } from '@/routing/router'
 import { TasksScreen } from './tasks-screen'
@@ -21,7 +22,7 @@ vi.mock('@reflect/core', async (importOriginal) => ({
   getCompletedTasks,
 }))
 vi.mock('@/providers/graph-provider', () => ({
-  useGraph: () => ({ graph: { root: '/g', name: 'g', cloudSync: false, generation: 1 } }),
+  useGraph: () => ({ graph: { root: '/g', name: 'g', generation: 1 } }),
 }))
 vi.mock('@/lib/use-today', () => ({ useToday: () => '2026-06-14' }))
 vi.mock('@/providers/settings-provider', () => ({
@@ -202,8 +203,9 @@ function RouteProbe(): ReactNode {
   return <output data-testid="route">{JSON.stringify(route)}</output>
 }
 
-function renderScreen() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+function renderScreen(
+  client = new QueryClient({ defaultOptions: { queries: { retry: false } } }),
+) {
   return render(
     <QueryClientProvider client={client}>
       <RouterProvider>
@@ -664,7 +666,7 @@ describe('TasksScreen', () => {
     await userEvent.keyboard('{Enter}')
     await view.findByTestId('task-editor')
     // An empty Return-to-add row, left untouched, is removed rather than left as a
-    // blank `- [ ] ` line — the real editor routes that empty exit to delete (see
+    // blank `+ [ ] ` line — the real editor routes that empty exit to delete (see
     // the finalizer unit test); here we check the optimistic row's identity flows
     // through, deleting the freshly written daily-note line, not some other row.
     await userEvent.click(view.getByRole('button', { name: 'delete-edit' }))
@@ -744,7 +746,7 @@ describe('TasksScreen', () => {
     await userEvent.click(await view.findByRole('button', { name: 'first' }))
     await view.findByTestId('task-editor')
     await userEvent.click(view.getByRole('button', { name: 'continue-empty' }))
-    // The cleared row is deleted (not edited to `- [ ]`); editTask is never called.
+    // The cleared row is deleted (not edited to `+ [ ]`); editTask is never called.
     await waitFor(() =>
       expect(deleteTask).toHaveBeenCalledWith(expect.objectContaining({ notePath: 'notes/a.md' }), 1),
     )
@@ -804,7 +806,7 @@ describe('TasksScreen', () => {
 
     await view.findByText('plan')
     await userEvent.keyboard('{Meta>}a{/Meta}') // select both (no editor)
-    await userEvent.click(view.getByRole('button', { name: /Schedule \(2\)/ }))
+    await userEvent.click(view.getByRole('button', { name: /Schedule 2/ }))
     // Pick June 20 in the calendar (today mock = 2026-06-14, so it opens on June).
     await userEvent.click(await view.findByText('20'))
 
@@ -826,7 +828,7 @@ describe('TasksScreen', () => {
 
     await view.findByText('plan')
     await userEvent.keyboard('{Meta>}a{/Meta}') // select both (no editor mounts)
-    await userEvent.click(view.getByRole('button', { name: /Convert to bullet \(2\)/ }))
+    await userEvent.click(view.getByRole('button', { name: /Convert to bullet 2/ }))
 
     await waitFor(() => expect(convertTaskToBullet).toHaveBeenCalledTimes(2))
     expect(convertTaskToBullet).toHaveBeenCalledWith(expect.objectContaining({ notePath: 'notes/a.md' }), 1)
@@ -863,7 +865,7 @@ describe('TasksScreen', () => {
     const view = renderScreen()
 
     await userEvent.click(await view.findByRole('button', { name: 'plan' })) // sole → editor mounts
-    await userEvent.click(view.getByRole('button', { name: /Convert to bullet \(1\)/ }))
+    await userEvent.click(view.getByRole('button', { name: /Convert to bullet 1/ }))
 
     // Edit first (persist the draft), then convert the rewritten line.
     await waitFor(() =>
@@ -962,6 +964,72 @@ describe('TasksScreen', () => {
     // V1's middle state: the row stays visible, struck, until archived.
     await view.findByRole('button', { name: 'Reopen: project task' })
     expect(view.getByText('project task')).toBeDefined()
+    view.unmount()
+  })
+
+  it('yields the struck row to the index when the task is reopened at its source note', async () => {
+    toggleTask.mockResolvedValue(undefined)
+    getOpenTasks.mockResolvedValue([
+      task({
+        notePath: 'notes/p.md',
+        markerOffset: 5,
+        raw: '[ ] project task',
+        text: 'project task',
+        noteTitle: 'Project',
+        updatedAt: 100,
+      }),
+    ])
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = renderScreen(client)
+
+    await userEvent.click(await view.findByRole('button', { name: 'Complete: project task' }))
+    await view.findByRole('button', { name: 'Reopen: project task' })
+
+    // The checkbox is flipped back to [ ] in the note itself; the reindex
+    // reports the task open again with the note's newer updatedAt. The session's
+    // struck copy must yield — keeping it would shadow the live row and its
+    // Reopen would fail (the [x] line is no longer in the note).
+    getOpenTasks.mockResolvedValue([
+      task({
+        notePath: 'notes/p.md',
+        markerOffset: 5,
+        raw: '[ ] project task',
+        text: 'project task',
+        noteTitle: 'Project',
+        updatedAt: 200,
+      }),
+    ])
+    await client.invalidateQueries({ queryKey: [INDEX_QUERY_SCOPE] })
+
+    await view.findByRole('button', { name: 'Complete: project task' })
+    expect(view.queryByRole('button', { name: 'Reopen: project task' })).toBeNull()
+    view.unmount()
+  })
+
+  it('keeps the struck row when a refetch races the completion’s reindex', async () => {
+    toggleTask.mockResolvedValue(undefined)
+    const staleRow = task({
+      notePath: 'notes/p.md',
+      markerOffset: 5,
+      raw: '[ ] project task',
+      text: 'project task',
+      noteTitle: 'Project',
+      updatedAt: 100,
+    })
+    getOpenTasks.mockResolvedValue([staleRow])
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const view = renderScreen(client)
+
+    await userEvent.click(await view.findByRole('button', { name: 'Complete: project task' }))
+    await view.findByRole('button', { name: 'Reopen: project task' })
+
+    // An unrelated invalidation refetches before the completion's reindex lands:
+    // the index still returns the pre-completion row (same updatedAt). The row
+    // must stay struck rather than flicker back to open.
+    await client.invalidateQueries({ queryKey: [INDEX_QUERY_SCOPE] })
+
+    await view.findByRole('button', { name: 'Reopen: project task' })
+    expect(view.queryByRole('button', { name: 'Complete: project task' })).toBeNull()
     view.unmount()
   })
 
@@ -1384,8 +1452,8 @@ describe('TasksScreen', () => {
     const view = renderScreen()
 
     await userEvent.click(await view.findByRole('button', { name: 'Complete: project task' }))
-    // The row lingers struck and an Archive (1) action appears.
-    const archive = await view.findByRole('button', { name: /Archive \(1\)/ })
+    // The row lingers struck and an Archive 1 action appears.
+    const archive = await view.findByRole('button', { name: /Archive 1/ })
     expect(view.getByText('project task')).toBeDefined()
 
     await userEvent.click(archive)

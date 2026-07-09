@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { detectConflictMarkers, resolveConflictMarkers } from './conflict-markers'
+import {
+  conflictMarkerBlockCount,
+  conflictMarkerLabels,
+  detectConflictMarkers,
+  parseConflictMarkers,
+  resolveConflictMarkers,
+} from './conflict-markers'
 
 const CONFLICTED = [
   '# Shared',
@@ -95,5 +101,99 @@ describe('resolveConflictMarkers', () => {
 
   it('is the identity on unconflicted text', () => {
     expect(resolveConflictMarkers('plain\ntext\n', 'ours')).toBe('plain\ntext\n')
+  })
+})
+
+describe('conflictMarkerLabels', () => {
+  it('parses device-name labels from the first complete block', () => {
+    const marked =
+      "intro\n<<<<<<< Alex's MacBook Pro\nmac\n=======\nphone\n>>>>>>> Alex's iPhone\noutro\n"
+    expect(conflictMarkerLabels(marked)).toEqual({
+      ours: "Alex's MacBook Pro",
+      theirs: "Alex's iPhone",
+    })
+  })
+
+  it('parses the git path’s generic labels', () => {
+    expect(conflictMarkerLabels(CONFLICTED)).toEqual({
+      ours: 'this device',
+      theirs: 'other device',
+    })
+  })
+
+  it('returns null when there is no complete block', () => {
+    expect(conflictMarkerLabels('plain\ntext\n')).toBeNull()
+    expect(conflictMarkerLabels('<<<<<<< a\nunterminated')).toBeNull()
+    // Out-of-order marker lines are prose, not a conflict.
+    expect(conflictMarkerLabels('=======\n>>>>>>> b\n<<<<<<< a\n')).toBeNull()
+  })
+})
+
+describe('parseConflictMarkers', () => {
+  it('splits text and conflict blocks in file order, labels included', () => {
+    expect(parseConflictMarkers(CONFLICTED)).toEqual([
+      { kind: 'text', text: '# Shared\n' },
+      {
+        kind: 'conflict',
+        ours: { label: 'this device', text: 'edited on a' },
+        theirs: { label: 'other device', text: 'edited on b' },
+      },
+      { kind: 'text', text: '' },
+    ])
+  })
+
+  it('keeps the sides a resolution would keep — same splice, per side', () => {
+    const segments = parseConflictMarkers(CONFLICTED)
+    const conflict = segments.find((segment) => segment.kind === 'conflict')
+    expect(conflict?.kind).toBe('conflict')
+    if (conflict?.kind === 'conflict') {
+      expect(resolveConflictMarkers(CONFLICTED, 'ours')).toContain(conflict.ours.text)
+      expect(resolveConflictMarkers(CONFLICTED, 'theirs')).toContain(conflict.theirs.text)
+    }
+  })
+
+  it('parses the iCloud sweep’s stacked shape, empty sides included', () => {
+    const stacked =
+      '<<<<<<< Mac\nmac\n=======\nphone\n>>>>>>> iPhone\n<<<<<<< Mac\n=======\nipad\n>>>>>>> iPad\n'
+    expect(parseConflictMarkers(stacked)).toEqual([
+      {
+        kind: 'conflict',
+        ours: { label: 'Mac', text: 'mac' },
+        theirs: { label: 'iPhone', text: 'phone' },
+      },
+      {
+        kind: 'conflict',
+        ours: { label: 'Mac', text: '' },
+        theirs: { label: 'iPad', text: 'ipad' },
+      },
+      { kind: 'text', text: '' },
+    ])
+  })
+
+  it('flows an unterminated block back into the text verbatim', () => {
+    const truncated = 'before\n<<<<<<< this device\nkept line'
+    expect(parseConflictMarkers(truncated)).toEqual([
+      { kind: 'text', text: truncated },
+    ])
+  })
+
+  it('is a single text segment on unconflicted text', () => {
+    expect(parseConflictMarkers('plain\ntext\n')).toEqual([
+      { kind: 'text', text: 'plain\ntext\n' },
+    ])
+  })
+})
+
+describe('conflictMarkerBlockCount', () => {
+  it('counts complete blocks only', () => {
+    expect(conflictMarkerBlockCount('plain\ntext\n')).toBe(0)
+    expect(conflictMarkerBlockCount(CONFLICTED)).toBe(1)
+    expect(conflictMarkerBlockCount('<<<<<<< a\nunterminated')).toBe(0)
+  })
+
+  it('counts the iCloud sweep’s stacked three-way shape as two blocks', () => {
+    const stacked =
+      '<<<<<<< Mac\nmac\n=======\nphone\n>>>>>>> iPhone\n<<<<<<< Mac\n=======\nipad\n>>>>>>> iPad\n'
+    expect(conflictMarkerBlockCount(stacked)).toBe(2)
   })
 })

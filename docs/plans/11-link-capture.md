@@ -1,5 +1,11 @@
 # Plan 11 — Link Capture
 
+> **Update (2026-07-05):** the deferred iOS share half has landed — a
+> `ShareExtension` target spools the same envelopes (plus non-URL text as
+> `kind: append` captures) into the App Group inbox, and the mobile app
+> relays + drains them on launch/foreground. See
+> [the porting doc](../porting/reflect-mobile/share-extension.md).
+>
 > **Status (2026-06-14): Implemented.** The pipeline below is built end-to-end:
 > `apps/extension` (WXT MV3, popup + queue + ⌘⇧K), `apps/native-host`
 > (`reflect-capture-host`, bundled as a second sidecar), the capture inbox +
@@ -25,8 +31,8 @@ spooled immediately and enriched asynchronously later.
 **Depends on:** Plan 02 (writes/assets), Plan 06 (append-to-today), Plan 10 (BYOK AI +
 keychain + privacy).
 **Unlocks:** the capture half of Reflect's daily-first spine.
-**Research:** bridge options, app-closed behavior, and the mobile story are mapped in
-[the bridge spike](../spikes/link-capture-bridge.md).
+**Research:** bridge options, app-closed behavior, and the mobile story are captured in
+this plan.
 
 **Architecture:** the extension lives in `apps/extension`; all durable writes, AI
 enrichment, and privacy checks go through `apps/desktop` + `@reflect/core`
@@ -42,7 +48,7 @@ the native-messaging host + capture inbox, desktop write path (daily-note `[[Lin
 entry + optional dedicated note), screenshot assets, async enrichment (meta-tag scrape +
 BYOK AI description), provenance frontmatter, privacy enforcement.
 **Out:** Safari/iOS/Android share (later — but the capture envelope + inbox drain are
-deliberately platform-agnostic so mobile reuses them; see the spike doc), full article
+deliberately platform-agnostic so mobile reuses them), full article
 extraction / read-later (deferred), dedup-heavy clipping (basic dedup only).
 
 ## Architecture (inverted from V1: desktop owns writes)

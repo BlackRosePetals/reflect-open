@@ -1,117 +1,140 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { setBridge } from '@reflect/core'
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
+import type { MobileStorageInfo } from '@reflect/core'
 import { MobileOnboardingScreen } from './onboarding-screen'
 
-vi.mock('@tauri-apps/plugin-http', () => ({ fetch: vi.fn() }))
-const httpFetch = vi.mocked(tauriFetch)
-
-const completeOnboarding = vi.hoisted(() => vi.fn(async () => {}))
+const completeOnboarding = vi.hoisted(() => vi.fn(async (_kind: string, _root?: string) => {}))
+const storageInfo = vi.hoisted<{ current: unknown }>(() => ({ current: null }))
+const storageResolving = vi.hoisted<{ current: boolean }>(() => ({ current: false }))
 vi.mock('@/providers/graph-provider', () => ({
-  useGraph: () => ({ mobileRoot: '/Documents', completeOnboarding }),
+  useGraph: () => ({
+    mobileStorageInfo: storageInfo.current,
+    mobileStorageResolving: storageResolving.current,
+    completeOnboarding,
+  }),
 }))
 
-let cloned: Array<Record<string, unknown>>
-/** When set, `git_clone` never resolves — to exercise the in-flight UI. */
-let hangClone: boolean
+function setStorage(info: MobileStorageInfo): void {
+  storageInfo.current = info
+}
 
 beforeEach(() => {
-  cloned = []
-  hangClone = false
-  setBridge({
-    invoke: async (command, args) => {
-      if (command === 'secret_get') {
-        // A stored credential lets the auth step advance straight to the repo step.
-        return JSON.stringify({ kind: 'pat', token: 'ghp_abc' })
-      }
-      if (command === 'git_clone') {
-        cloned.push(args)
-        if (hangClone) {
-          return new Promise(() => {}) // stays pending
-        }
-        return null
-      }
-      return null
-    },
-    listen: async () => () => {},
+  storageResolving.current = false
+  setStorage({
+    localRoot: '/Documents',
+    icloudDocumentsRoot: '/iCloud/Documents',
+    icloudGraphRoots: [],
   })
-  // GET /user accepts the stored token and identifies the account.
-  httpFetch.mockResolvedValue(
-    new Response(JSON.stringify({ login: 'alex' }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }),
-  )
 })
 
 afterEach(() => {
   cleanup()
-  setBridge(null)
   vi.clearAllMocks()
 })
 
 describe('MobileOnboardingScreen', () => {
-  it('starts a fresh graph without cloning', async () => {
+  it('leads with iCloud sync and creates the named iCloud notes', async () => {
     render(<MobileOnboardingScreen />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Start fresh' }))
+    expect(screen.getByRole('heading', { name: 'iCloud sync' })).toBeTruthy()
+    expect(screen.getByLabelText('Graph name')).toHaveProperty('value', 'Notes')
+    fireEvent.change(screen.getByLabelText('Graph name'), { target: { value: 'Journal' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Setup graph' }))
 
-    await waitFor(() => expect(completeOnboarding).toHaveBeenCalled())
-    expect(cloned).toEqual([])
+    await waitFor(() =>
+      expect(completeOnboarding).toHaveBeenCalledWith('icloud', '/iCloud/Documents/Journal'),
+    )
   })
 
-  it('clones the chosen repo into the fixed root, then completes onboarding', async () => {
-    render(<MobileOnboardingScreen />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Connect to GitHub' }))
-    // The stored credential auto-advances past auth to the repo step.
-    await waitFor(() => expect(screen.getByLabelText('Backup repository')).toBeTruthy())
-
-    fireEvent.change(screen.getByLabelText('Backup repository'), {
-      target: { value: 'notes' }, // bare name → the signed-in account
+  it('lists every container graph while keeping create available', async () => {
+    setStorage({
+      localRoot: '/Documents',
+      icloudDocumentsRoot: '/iCloud/Documents',
+      icloudGraphRoots: ['/iCloud/Documents/Notes', '/iCloud/Documents/Work'],
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Download & open' }))
-
-    await waitFor(() =>
-      expect(cloned).toEqual([
-        { url: 'https://github.com/alex/notes.git', path: '/Documents', token: 'ghp_abc' },
-      ]),
-    )
-    expect(completeOnboarding).toHaveBeenCalled()
-  })
-
-  it('disables Back while a clone is in flight (can’t leave it running)', async () => {
-    hangClone = true
     render(<MobileOnboardingScreen />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Connect to GitHub' }))
-    await waitFor(() => expect(screen.getByLabelText('Backup repository')).toBeTruthy())
-
-    fireEvent.change(screen.getByLabelText('Backup repository'), { target: { value: 'notes' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Download & open' }))
-
-    // The clone is pending, so Back must be disabled — leaving would let the
-    // clone finish and open the graph after the user returned to the choice.
-    await waitFor(() =>
-      expect((screen.getByRole('button', { name: 'Back' }) as HTMLButtonElement).disabled).toBe(
-        true,
-      ),
-    )
-  })
-
-  it('rejects an empty repo name instead of cloning', async () => {
-    render(<MobileOnboardingScreen />)
-
-    fireEvent.click(screen.getByRole('button', { name: 'Connect to GitHub' }))
-    await waitFor(() => expect(screen.getByLabelText('Backup repository')).toBeTruthy())
-
-    fireEvent.click(screen.getByRole('button', { name: 'Download & open' }))
-
+    expect(screen.getByText('We found notes in iCloud Drive. Continue with one, or start fresh.')).toBeTruthy()
+    expect(screen.getByText('Start fresh')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Continue with Notes' })).toBeTruthy()
     expect(
-      await screen.findByText('Enter the repository name (or owner/name for another account).'),
+      (screen.getByRole('button', { name: 'Setup graph' }) as HTMLButtonElement).disabled,
+    ).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Continue with Work' }))
+
+    await waitFor(() =>
+      expect(completeOnboarding).toHaveBeenCalledWith('icloud', '/iCloud/Documents/Work'),
+    )
+  })
+
+  it('creates a new iCloud graph alongside existing ones', async () => {
+    setStorage({
+      localRoot: '/Documents',
+      icloudDocumentsRoot: '/iCloud/Documents',
+      icloudGraphRoots: ['/iCloud/Documents/Notes'],
+    })
+    render(<MobileOnboardingScreen />)
+
+    fireEvent.change(screen.getByLabelText('Graph name'), { target: { value: 'Journal' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Setup graph' }))
+
+    await waitFor(() =>
+      expect(completeOnboarding).toHaveBeenCalledWith('icloud', '/iCloud/Documents/Journal'),
+    )
+  })
+
+  it('keeps the on-device choice as a quiet secondary path', async () => {
+    render(<MobileOnboardingScreen />)
+
+    expect(screen.queryByText(/Your notes are plain markdown files/i)).toBeNull()
+    expect(screen.queryByText('No iCloud sync. You can add GitHub later from Settings.')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Or, use this device only' }))
+
+    await waitFor(() => expect(completeOnboarding).toHaveBeenCalledWith('local'))
+  })
+
+  it('shows the iCloud section as pending while the container resolves', () => {
+    // Fresh install: the sandbox root is seeded instantly but the container
+    // lookup is still running — the iCloud card must read as loading, not as
+    // signed-out, and the create form must wait for the real listing.
+    storageResolving.current = true
+    setStorage({ localRoot: '/Documents', icloudDocumentsRoot: null, icloudGraphRoots: [] })
+    render(<MobileOnboardingScreen />)
+
+    expect(screen.getByRole('heading', { name: 'iCloud sync' })).toBeTruthy()
+    expect(screen.getByText('Checking iCloud Drive…')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Setup graph' })).toBeNull()
+    expect(screen.queryByText(/Sign in to iCloud/)).toBeNull()
+    // The on-device path stays live — its root is already known.
+    const local = screen.getByRole('button', { name: 'Or, use this device only' })
+    expect((local as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('keeps the iCloud recommendation visible when iCloud is unavailable', () => {
+    setStorage({ localRoot: '/Documents', icloudDocumentsRoot: null, icloudGraphRoots: [] })
+    render(<MobileOnboardingScreen />)
+
+    expect(screen.getByRole('heading', { name: 'iCloud sync' })).toBeTruthy()
+    expect(
+      screen.getByText('Turn on iCloud Drive to keep your notes synced between devices.'),
     ).toBeTruthy()
-    expect(cloned).toEqual([])
-    expect(completeOnboarding).not.toHaveBeenCalled()
+    expect(
+      screen.getByText('Sign in to iCloud on this device, then reopen Reflect.'),
+    ).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Or, use this device only' })).toBeTruthy()
+  })
+
+  it('does not offer repository setup from the first-run picker', () => {
+    render(<MobileOnboardingScreen />)
+
+    expect(screen.queryByRole('button', { name: /github/i })).toBeNull()
+    expect(screen.queryByText(/backup repository/i)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Download & open' })).toBeNull()
+  })
+
+  it('does not expose folder language in the primary first-run path', () => {
+    render(<MobileOnboardingScreen />)
+
+    expect(screen.queryByText(/folder/i)).toBeNull()
   })
 })
