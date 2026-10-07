@@ -5,6 +5,7 @@ import {
   createSyncEngine,
   emitFileChanges,
   errorMessage,
+  getAuthenticatedUser,
   getGithubRepo,
   getGithubToken,
   githubCredential,
@@ -15,6 +16,7 @@ import {
   gitStatus,
   isCaptureSpoolPath,
   isNotePath,
+  isSyncError,
   loadGithubAuth,
   loadHostCredential,
   parseGithubRemote,
@@ -376,6 +378,9 @@ export function createBackupController(options: BackupControllerOptions): Backup
               : async () => null,
         onStatus: (engineStatus) => {
           setState({ phase: 'connected', remoteUrl, repo, status: engineStatus })
+          if (repo !== null && isForbidden(engineStatus)) {
+            void classifyForbidden(engineStatus, remoteUrl, repo)
+          }
         },
         onLargeFilesSkipped: (files) => {
           // Surface the guardrail loudly: these files are NOT in the backup.
@@ -400,6 +405,49 @@ export function createBackupController(options: BackupControllerOptions): Backup
         console.error('backup start failed:', errorMessage(error))
         setState({ phase: 'disconnected' })
       }
+    }
+  }
+
+  /**
+   * GitHub answers 403 both for a token without access to the repository
+   * and for rate limiting. libgit2 cannot tell either from a bad token, so
+   * the engine reports `auth` and the UI offers "reconnect GitHub", which
+   * fixes neither. Ask GitHub whether the token itself is good: when it is,
+   * the push was refused for another reason and the status names it.
+   */
+  async function classifyForbidden(
+    status: SyncStatus,
+    remoteUrl: string,
+    repo: GithubRepoRef,
+  ): Promise<void> {
+    let next: SyncStatus
+    try {
+      const token = await getGithubToken(providerFetch)
+      if (token === null) {
+        return
+      }
+      await getAuthenticatedUser(token, providerFetch)
+      next = {
+        state: 'error',
+        errorKind: 'rejected',
+        message: `GitHub refused the sync (403). Check that Reflect has access to ${repo.owner}/${repo.name}, or wait a few minutes if GitHub is rate limiting.`,
+      }
+    } catch (cause) {
+      // A rejected probe confirms the bad credential: `auth` stands. Anything
+      // else (GitHub throttling, a fetch that never reached it, an unparsable
+      // reply) says nothing about the credential, so it must not keep asking
+      // for a reconnect either.
+      if (cause instanceof ReflectError && cause.kind === 'auth') {
+        return
+      }
+      next = {
+        state: 'offline',
+        message: 'GitHub is rate limiting or unreachable; the backup will retry',
+      }
+    }
+    // Only replace the exact status this probe was asked about.
+    if (state.phase === 'connected' && state.status === status) {
+      setState({ phase: 'connected', remoteUrl, repo, status: next })
     }
   }
 
@@ -472,4 +520,9 @@ export function createBackupController(options: BackupControllerOptions): Backup
       listeners.clear()
     },
   }
+}
+
+/** An `auth` error that is really an HTTP 403 (libgit2 phrases it `status code: 403`). */
+function isForbidden(status: SyncStatus): boolean {
+  return isSyncError(status) && status.errorKind === 'auth' && status.message.includes('403')
 }
