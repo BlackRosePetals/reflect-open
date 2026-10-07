@@ -661,12 +661,10 @@ describe('createBackupController', () => {
     controller.dispose()
   })
 
-  // Safety invariant S4 (docs/git-backup-safety.md): the quit-time commit must
-  // queue behind an in-flight cycle. Today `flushBackup` calls
-  // `gitCommitAll` directly, so a commit can land between a pull's ref move
-  // and its checkout and commit the stale tree (#1405). Red on purpose until
-  // the flusher routes through the engine.
-  it.fails('quit flush waits for an in-flight pull before committing', async () => {
+  // Safety invariant S4 (docs/git-backup-safety.md): the quit-time commit
+  // queues behind an in-flight cycle, so it can never land between a pull's
+  // ref move and its checkout and commit the stale tree (#1405).
+  it('quit flush waits for an in-flight pull before committing', async () => {
     const { calls, releaseMerge, releaseCommit } = fakeBridge({
       gateMerge: true,
       gateSecondCommit: true,
@@ -702,6 +700,29 @@ describe('createBackupController', () => {
       releaseMerge()
       releaseCommit()
       controller.dispose()
+    }
+  })
+
+  it('the mobile background flush commits while the document is hidden', async () => {
+    setPlatformSurface({ mobileApp: true })
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    const { calls } = fakeBridge()
+    visibility.mockReturnValue('visible')
+    const controller = createBackupController({ graph: GRAPH, indexGeneration: 1 })
+    try {
+      await controller.start()
+      await vi.waitFor(() => {
+        expect(calls).toContain('git_merge_remote') // the launch cycle ran
+      })
+      const before = commitCount(calls)
+
+      visibility.mockReturnValue('hidden')
+      await flushBackup()
+      expect(commitCount(calls)).toBe(before + 1)
+    } finally {
+      controller.dispose()
+      visibility.mockRestore()
+      setPlatformSurface({ mobileApp: false })
     }
   })
 
@@ -776,8 +797,8 @@ describe('createBackupController', () => {
       document.dispatchEvent(new Event('visibilitychange'))
       await vi.waitFor(() => {
         expect(calls.filter((command) => command === 'git_commit_all')).toHaveLength(1)
+        expect(calls.filter((command) => command === 'git_fetch')).toHaveLength(1)
       })
-      expect(calls.filter((command) => command === 'git_fetch')).toHaveLength(1)
 
       visibility.mockReturnValue('hidden')
       vi.useFakeTimers()
