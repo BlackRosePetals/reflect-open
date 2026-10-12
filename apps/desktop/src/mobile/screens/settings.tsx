@@ -52,7 +52,6 @@ import {
 import { useAppStoreEnvironment } from '@/mobile/use-app-store-environment.ts'
 import {
   classicAccessMessage,
-  formatClassicDate,
   useClassicAccess,
   useClassicSignOut,
 } from '@/mobile/use-classic-access.ts'
@@ -416,7 +415,7 @@ export function MobileSettings(): ReactElement {
                     : subscription.value === 'yearly'
                       ? 'Yearly'
                       : classicAccess.active && classicAccess.value !== null
-                        ? `Reflect Classic, until ${formatClassicDate(classicAccess.value.expiresAt)}`
+                        ? `Reflect Classic, until ${formatFullDate(new Date(classicAccess.value.expiresAt), settings.dateFormat)}`
                         : subscription.isLoading || classicAccess.isLoading
                           ? 'Checking…'
                           : 'Not subscribed'
