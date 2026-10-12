@@ -7,12 +7,12 @@ import type {
   ChatModelSelection,
   ChatStreamEvent,
   ChatTurn,
+  EmbedStatus,
   GraphInfo,
   Settings,
   StreamChatOptions,
 } from '@reflect/core'
 import { NO_REPLY_NOTICE } from '@reflect/core'
-import { setPlatformSurface } from '@/lib/platform-surface.ts'
 import { ChatProvider, useChatSession } from '@/providers/chat-provider.tsx'
 
 /**
@@ -38,6 +38,9 @@ vi.mock('@reflect/core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@reflect/core')>()),
   ...core,
 }))
+
+const embedState = vi.hoisted(() => ({ status: { status: 'uninitialized' } as EmbedStatus }))
+vi.mock('@/lib/use-embed-status.ts', () => ({ useEmbedStatus: () => embedState.status }))
 
 const settingsState = vi.hoisted(() => ({
   models: [] as AiProviderConfig[],
@@ -128,6 +131,7 @@ function scriptTurn(events: ChatStreamEvent[]) {
 }
 
 beforeEach(() => {
+  embedState.status = { status: 'uninitialized' }
   vi.clearAllMocks()
   settingsState.models = [MODEL]
   settingsState.defaultId = 'm1'
@@ -236,6 +240,7 @@ describe('ChatProvider persistence', () => {
 
   it('passes the semantic search setting into chat turns', async () => {
     settingsState.semanticSearchEnabled = true
+    embedState.status = { status: 'ready', model: 'all-MiniLM-L6-v2' }
     scriptTurn([{ type: 'complete', messages: [{ role: 'assistant', content: 'Hi.' }] }])
     const { act } = await renderProvider()
     await vi.waitFor(() => expect(core.listChatConversations).toHaveBeenCalled())
@@ -263,23 +268,31 @@ describe('ChatProvider persistence', () => {
     )
   })
 
-  it('forces lexical search on the mobile surface, over an enabled setting', async () => {
-    settingsState.semanticSearchEnabled = true
-    setPlatformSurface({ mobileApp: true })
-    try {
-      scriptTurn([{ type: 'complete', messages: [{ role: 'assistant', content: 'Hi.' }] }])
-      const { act } = await renderProvider()
-      await vi.waitFor(() => expect(core.listChatConversations).toHaveBeenCalled())
+  it.each<EmbedStatus>([
+    { status: 'unsupported' },
+    { status: 'uninitialized' },
+    { status: 'loading' },
+    { status: 'failed', message: 'offline' },
+  ])(
+    'forces lexical search while the runtime is $status, over an enabled setting',
+    async (status) => {
+      settingsState.semanticSearchEnabled = true
+      embedState.status = status
+      try {
+        scriptTurn([{ type: 'complete', messages: [{ role: 'assistant', content: 'Hi.' }] }])
+        const { act } = await renderProvider()
+        await vi.waitFor(() => expect(core.listChatConversations).toHaveBeenCalled())
 
-      await act(() => session?.send('hello'))
+        await act(() => session?.send('hello'))
 
-      expect(core.streamChat).toHaveBeenCalledWith(
-        expect.objectContaining({ semanticSearchEnabled: false }),
-      )
-    } finally {
-      setPlatformSurface({ mobileApp: false })
-    }
-  })
+        expect(core.streamChat).toHaveBeenCalledWith(
+          expect.objectContaining({ semanticSearchEnabled: false }),
+        )
+      } finally {
+        embedState.status = { status: 'uninitialized' }
+      }
+    },
+  )
 
   it('holds the composer draft and clears it when a send goes through', async () => {
     scriptTurn([{ type: 'complete', messages: [{ role: 'assistant', content: 'Hi.' }] }])
