@@ -4,8 +4,8 @@ import { MediaLightbox } from '@/editor/media-lightbox.tsx'
 import { useWikilinkResolver } from '@/editor/resolve-wikilink.ts'
 import { useXPostResolver, X_MEDIA_URL_PROTOCOLS } from '@/editor/use-x-post-resolver.ts'
 import { lightboxItemFromXPostMedia } from '@/editor/x-post-media-lightbox-item.ts'
-import { resolveYouTubeVideo } from '@/editor/youtube-video-resolver.ts'
-import { isTouchEditorSurface } from '@/lib/platform-surface.ts'
+import { useYouTubeVideoResolver } from '@/editor/youtube-video-resolver.ts'
+import { useCoreServices } from '@/services/services-provider.tsx'
 import { cn } from '@/lib/utils.ts'
 import type {
   AcceptPendingReplacementOptions,
@@ -290,6 +290,8 @@ export function NoteEditor({
   onSearchChange,
   handleRef,
 }: NoteEditorProps): ReactElement {
+  const { platform, logger } = useCoreServices()
+  const touchEditor = platform.surface.touchEditor
   const resolveXPost = useXPostResolver()
   const resolveWikilink = useWikilinkResolver()
   const innerRef = useRef<EditorHandle>(null)
@@ -320,6 +322,7 @@ export function NoteEditor({
     onExitBoundaryRef.current = onExitBoundary
   })
 
+  const resolveYouTubeVideo = useYouTubeVideoResolver()
   const lightbox = useLightbox()
   const openLightbox = lightbox.open
   // Captured when the lightbox opens, so a later graph switch cannot retarget it.
@@ -397,7 +400,7 @@ export function NoteEditor({
           openPath !== null && openImage !== null
             ? () => {
                 void Promise.resolve(openImage(openPath)).catch((cause) => {
-                  console.error('open image failed:', errorMessage(cause))
+                  logger.error('open image failed:', errorMessage(cause))
                 })
               }
             : null,
@@ -454,7 +457,7 @@ export function NoteEditor({
         // from it at focus time, and smart punctuation corrupts markdown
         // syntax ([[ wiki links, code spans, --- fences) — Plan 19 gate.
         // Autocorrect is independent and stays on (EditorInputTraits).
-        spellCheck={isTouchEditorSurface() ? false : spellCheck}
+        spellCheck={touchEditor ? false : spellCheck}
         searchQuery={searchQuery ?? ''}
         onSearchChange={onSearchChange}
         // Reflect's implementation-neutral `12h`/`24h` maps to meowdown's
@@ -467,7 +470,7 @@ export function NoteEditor({
         // revealed on hover and drag-reorders blocks with a pointer, neither of
         // which a touch webview can express. Turning it off also drops the drop
         // indicator, which meowdown gates on the same prop.
-        blockHandle={isTouchEditorSurface() ? false : blockHandle}
+        blockHandle={touchEditor ? false : blockHandle}
         editorClassName={cn('reflect-editor', className)}
         placeholder={titlePlaceholder}
         onDocChange={handleDocChange}

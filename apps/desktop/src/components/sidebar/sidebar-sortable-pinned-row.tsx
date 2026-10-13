@@ -1,16 +1,12 @@
 import { memo, useCallback, type CSSProperties, type MouseEvent, type ReactElement } from 'react'
 import { useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { useQueryClient } from '@tanstack/react-query'
 import { errorMessage } from '@reflect/core'
 import type { PinnedNote } from '@reflect/core'
-import { unpinNote } from '@/lib/note-pin.ts'
 import { useNoteLinkNavigation } from '@/hooks/use-note-link-navigation.ts'
-import { openNativeContextMenu } from '@/lib/native-menu/context-menu.ts'
-import { startOperation } from '@/lib/operations.ts'
-import { useGraph } from '@/providers/graph-provider.tsx'
 import { routeForPath, routesEqual } from '@/routing/route.ts'
 import { useRouter } from '@/routing/router.tsx'
+import { useAppServices, useCoreServices } from '@/services/services-provider.tsx'
 import { SidebarPinnedRowPreview } from './sidebar-pinned-row-preview.tsx'
 import { isModEvent } from '@meowdown/core'
 import { useNoteLabel } from '@/hooks/use-note-label.ts'
@@ -25,8 +21,8 @@ export const SidebarSortablePinnedRow = memo(function SidebarSortablePinnedRow({
   const { route } = useRouter()
   const navigateNoteLink = useNoteLinkNavigation()
   const noteLabel = useNoteLabel()
-  const { graph } = useGraph()
-  const queryClient = useQueryClient()
+  const { noteActions } = useCoreServices()
+  const { nativeMenu, operations } = useAppServices()
   const target = routeForPath(note.path)
   const active = routesEqual(route, target)
   const label = noteLabel(note)
@@ -41,28 +37,22 @@ export const SidebarSortablePinnedRow = memo(function SidebarSortablePinnedRow({
     (event: MouseEvent<HTMLButtonElement>): void => {
       event.preventDefault()
       event.stopPropagation()
-      if (graph === null) {
-        return
-      }
-      void openNativeContextMenu({
-        items: [
-          {
-            text: 'Unpin Note',
-            action: () => {
-              void unpinNote({
-                queryClient,
-                root: graph.root,
-                generation: graph.generation,
-                path: note.path,
-              })
+      void nativeMenu
+        .openContextMenu({
+          items: [
+            {
+              text: 'Unpin Note',
+              action: () => {
+                void noteActions.unpin(note.path)
+              },
             },
-          },
-        ],
-      }).catch((cause: unknown) => {
-        startOperation('Opening note menu').fail(errorMessage(cause))
-      })
+          ],
+        })
+        .catch((cause: unknown) => {
+          operations.start('Opening note menu').fail(errorMessage(cause))
+        })
     },
-    [graph, note, queryClient],
+    [nativeMenu, note, noteActions, operations],
   )
 
   return (

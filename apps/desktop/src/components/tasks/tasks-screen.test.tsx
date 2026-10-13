@@ -1,39 +1,22 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render } from 'vitest-browser-react'
+import { createTestWindowService, type TestWindowService } from '@reflect/app/testing'
 import { userEvent, type Locator } from 'vitest/browser'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import type { OpenTask } from '@reflect/core'
-import type { TaskAction } from '@/lib/note-task.ts'
-import { act, useEffect, useState, type MutableRefObject, type ReactNode } from 'react'
-import { queryKeys } from '@/lib/query-client.ts'
-import { makeOpenTask as task } from '@/lib/tasks/open-task-fixture.ts'
-import { resetRecentlyCompleted } from '@/lib/tasks/recently-completed.ts'
-import { RouterProvider, useRouter } from '@/routing/router.tsx'
+import { beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
+import {
+  createTestCoreServices,
+  makeOpenTask as task,
+  type TestCoreServices,
+} from '@reflect/core/testing'
+import type { OpenTask, TaskAction, TaskService, TaskWriteResult } from '@reflect/core'
+import { useEffect, useState, type MutableRefObject, type ReactNode } from 'react'
+import { act } from '@/test-utils/act.ts'
+import { useRouter } from '@/routing/router.tsx'
 import { fireEvent } from '@/test-utils/fire-event.ts'
 import { MOD_KEY } from '@/test-utils/mod-key.ts'
 import '@/test-utils/locator.ts'
+import { renderInApp } from '@/test-utils/render-in-app.tsx'
 import { TasksScreen } from './tasks-screen.tsx'
+import { deepLinkForRoute } from '@/lib/deep-links/format.ts'
 
-const getOpenTasks = vi.hoisted(() => vi.fn())
-const getCompletedTasks = vi.hoisted(() => vi.fn())
-const openRouteInNewWindow = vi.hoisted(() => vi.fn<() => Promise<boolean>>())
-vi.mock('@reflect/core', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@reflect/core')>()),
-  hasBridge: () => true,
-  getOpenTasks,
-  getCompletedTasks,
-}))
-vi.mock('@/lib/windows/open-in-new-window.ts', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/windows/open-in-new-window.ts')>()),
-  openRouteInNewWindow,
-}))
-vi.mock('@/providers/graph-provider.tsx', () => ({
-  useGraph: () => ({ graph: { root: '/g', name: 'g', generation: 1 } }),
-}))
-vi.mock('@/lib/use-today.ts', () => ({ useToday: () => '2026-06-14' }))
-vi.mock('@/providers/settings-provider.tsx', () => ({
-  useSettings: () => ({ settings: { dateFormat: 'mdy' } }),
-}))
 vi.mock('@/editor/markdown-preview.tsx', () => ({
   MarkdownPreview: ({ content, className }: { content: string; className?: string }) => {
     const strong = /^(.*)\*\*([^*]+)\*\*(.*)$/u.exec(content)
@@ -56,17 +39,18 @@ vi.mock('@/editor/markdown-preview.tsx', () => ({
   },
 }))
 
-const insertTask = vi.hoisted(() => vi.fn())
-const continueTaskInContext = vi.hoisted(() => vi.fn())
-const writeTask = vi.hoisted(() => vi.fn())
-vi.mock('@/lib/note-task.ts', () => ({
-  writeTask,
-  insertTask,
-  continueTaskInContext,
-}))
+// The screen runs on the real `TaskService` of the test app services; each
+// test steers its reads and writes through these spies.
+let getOpenTasks: MockInstance<TaskService['getOpenTasks']>
+let getCompletedTasks: MockInstance<TaskService['getCompletedTasks']>
+let writeTask: MockInstance<TaskService['writeTask']>
+let insertTask: MockInstance<TaskService['insertTask']>
+let continueTaskInContext: MockInstance<TaskService['continueTaskInContext']>
 
-/** The result of a write that changed nothing the cache needs to re-address. */
-const WRITTEN = { source: '', moved: [], inserted: [], tasks: [] }
+/**
+ * The result of a write that changed nothing the cache needs to re-address.
+ */
+const WRITTEN: TaskWriteResult = { source: '', moved: [], inserted: [], tasks: [], updatedAt: 0 }
 
 type TaskActionKind = TaskAction['kind']
 
@@ -74,14 +58,18 @@ function isWrite(actions: readonly TaskAction[], kinds: readonly TaskActionKind[
   return actions.length === kinds.length && actions.every((action, i) => action.kind === kinds[i])
 }
 
-/** The `writeTask` calls whose actions are exactly `kinds`, e.g. `('setMarkdown', 'toggle')`. */
+/**
+ * The `writeTask` calls whose actions are exactly `kinds`, e.g. `('setMarkdown', 'toggle')`.
+ */
 function writesOf(...kinds: TaskActionKind[]): unknown[][] {
-  return writeTask.mock.calls.filter((call: unknown[]) => isWrite(call[1] as TaskAction[], kinds))
+  return writeTask.mock.calls.filter((call) => isWrite(call[1], kinds))
 }
 
-/** Reject the writes whose actions are exactly `kinds`; every other write succeeds. */
+/**
+ * Reject the writes whose actions are exactly `kinds`; every other write succeeds.
+ */
 function failWrites(kinds: TaskActionKind[], cause: Error): void {
-  writeTask.mockImplementation((_task: unknown, actions: TaskAction[]) =>
+  writeTask.mockImplementation((_task, actions) =>
     isWrite(actions, kinds) ? Promise.reject(cause) : Promise.resolve(WRITTEN),
   )
 }
@@ -193,26 +181,23 @@ vi.mock('./task-editor', () => ({
   },
 }))
 
-const fail = vi.hoisted(() => vi.fn())
-const startOperation = vi.hoisted(() => vi.fn(() => ({ fail })))
-vi.mock('@/lib/operations.ts', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('@/lib/operations.ts')>()),
-  startOperation,
-}))
-
 function RouteProbe(): ReactNode {
   const { route } = useRouter()
   return <output data-testid="route">{JSON.stringify(route)}</output>
 }
 
-function renderScreen(client = new QueryClient({ defaultOptions: { queries: { retry: false } } })) {
-  return render(
-    <QueryClientProvider client={client}>
-      <RouterProvider>
-        <TasksScreen />
-        <RouteProbe />
-      </RouterProvider>
-    </QueryClientProvider>,
+function renderScreen() {
+  return renderInApp(
+    <>
+      <TasksScreen />
+      <RouteProbe />
+    </>,
+    {
+      app,
+      appServices: { window: noteWindows },
+      graph: { root: '/g', name: 'g', generation: 1 },
+      settings: { dateFormat: 'mdy' },
+    },
   ).then((view) => {
     const find = async (locator: Locator): Promise<Element> => {
       await expect.element(locator).toBeInTheDocument()
@@ -250,31 +235,34 @@ function renderScreen(client = new QueryClient({ defaultOptions: { queries: { re
 
 const waitFor = vi.waitFor
 
-beforeEach(() => {
-  window.sessionStorage.clear()
-  getOpenTasks.mockReset()
-  getCompletedTasks.mockReset()
-  getCompletedTasks.mockResolvedValue([])
-  openRouteInNewWindow.mockReset().mockResolvedValue(true)
-  writeTask.mockReset()
-  writeTask.mockResolvedValue(WRITTEN)
-  insertTask.mockReset()
-  insertTask.mockResolvedValue({
-    created: { astPath: [0], markdown: '', breadcrumbs: [], checked: false },
-    moved: [],
-  })
-  continueTaskInContext.mockReset()
-  continueTaskInContext.mockResolvedValue({
-    created: { astPath: [0], markdown: '', breadcrumbs: [], checked: false },
-    moved: [],
-  })
-  startOperation.mockClear()
-  fail.mockReset()
-  resetRecentlyCompleted()
-})
+let storage: TestCoreServices['storage']
 
-afterEach(async () => {
-  await cleanup()
+let operations: TestCoreServices['progress']
+
+let app: TestCoreServices
+let noteWindows: TestWindowService
+
+beforeEach(() => {
+  // A fresh app per test, so its task service's recently-completed set starts empty.
+  app = createTestCoreServices()
+  noteWindows = createTestWindowService()
+  operations = app.progress
+  storage = app.storage
+  app.clock.setToday('2026-06-14')
+  const tasks = app.tasks
+  getOpenTasks = vi.spyOn(tasks, 'getOpenTasks').mockResolvedValue([])
+  getCompletedTasks = vi.spyOn(tasks, 'getCompletedTasks').mockResolvedValue([])
+  writeTask = vi.spyOn(tasks, 'writeTask').mockResolvedValue(WRITTEN)
+  insertTask = vi.spyOn(tasks, 'insertTask').mockResolvedValue({
+    created: { astPath: [0], markdown: '', breadcrumbs: [], checked: false },
+    moved: [],
+    updatedAt: 0,
+  })
+  continueTaskInContext = vi.spyOn(tasks, 'continueTaskInContext').mockResolvedValue({
+    created: { astPath: [0], markdown: '', breadcrumbs: [], checked: false },
+    moved: [],
+    updatedAt: 0,
+  })
 })
 
 // Keep native browser navigation out of keyboard-handler tests in this suite.
@@ -287,7 +275,7 @@ describe('TasksScreen', () => {
   })
 
   it('does not flash an empty state while archived tasks are still loading', async () => {
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     getOpenTasks.mockResolvedValue([])
     const pendingCompleted = Promise.withResolvers<OpenTask[]>()
     getCompletedTasks.mockReturnValue(pendingCompleted.promise)
@@ -315,7 +303,7 @@ describe('TasksScreen', () => {
   })
 
   it('surfaces a failed archived query as an alert, not a blank list', async () => {
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     getOpenTasks.mockResolvedValue([])
     getCompletedTasks.mockRejectedValue(new Error('index unavailable'))
     const view = await renderScreen()
@@ -325,7 +313,7 @@ describe('TasksScreen', () => {
   })
 
   it('clears the archived error when "show archived" is turned off', async () => {
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     getOpenTasks.mockResolvedValue([
       task({ notePath: 'notes/p.md', text: 'open task', noteTitle: 'P' }),
     ])
@@ -509,10 +497,12 @@ describe('TasksScreen', () => {
     })
 
     await waitFor(() =>
-      expect(openRouteInNewWindow).toHaveBeenCalledWith({
-        kind: 'note',
-        path: 'notes/p.md',
-      }),
+      expect(noteWindows.openedNoteWindows()).toEqual([
+        deepLinkForRoute({
+          kind: 'note',
+          path: 'notes/p.md',
+        }),
+      ]),
     )
     expect(view.getByTestId('route').element().textContent).toBe('{"kind":"today"}')
     expect(view.queryByTestId('task-editor')).toBeNull()
@@ -531,10 +521,12 @@ describe('TasksScreen', () => {
     })
 
     await waitFor(() =>
-      expect(openRouteInNewWindow).toHaveBeenCalledWith({
-        kind: 'note',
-        path: 'notes/p.md',
-      }),
+      expect(noteWindows.openedNoteWindows()).toEqual([
+        deepLinkForRoute({
+          kind: 'note',
+          path: 'notes/p.md',
+        }),
+      ]),
     )
     expect(view.getByTestId('route').element().textContent).toBe('{"kind":"today"}')
     await view.unmount()
@@ -655,7 +647,6 @@ describe('TasksScreen', () => {
       expect(writeTask).toHaveBeenCalledWith(
         expect.objectContaining({ notePath: 'notes/p.md', astPath: [2] }),
         [{ kind: 'setMarkdown', markdown: 'edited content' }],
-        1,
       ),
     )
     await waitFor(() => expect(view.queryByTestId('task-editor')).toBeNull())
@@ -690,7 +681,6 @@ describe('TasksScreen', () => {
       expect(writeTask).toHaveBeenCalledWith(
         expect.objectContaining({ notePath: 'notes/p.md', astPath: [2] }),
         [{ kind: 'setMarkdown', markdown: 'edited content' }],
-        1,
       ),
     )
     // The selection (and so the inline editor) is left intact — flush never clears.
@@ -717,14 +707,13 @@ describe('TasksScreen', () => {
       expect(writeTask).toHaveBeenCalledWith(
         expect.objectContaining({ notePath: 'notes/p.md', astPath: [2] }),
         [{ kind: 'setMarkdown', markdown: 'edited content' }, { kind: 'toggle' }],
-        1,
       ),
     )
     await view.unmount()
   })
 
   it('editing an already-completed task with ⌘↵ saves the text, never reopens it', async () => {
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     getOpenTasks.mockResolvedValue([])
     getCompletedTasks.mockResolvedValue([
       task({
@@ -782,7 +771,7 @@ describe('TasksScreen', () => {
       fireEvent.click(view.getByRole('button', { name: 'third' }), MOD_KEY)
     })
     expect([pressed('first'), pressed('second'), pressed('third')]).toEqual([true, false, true])
-    expect(openRouteInNewWindow).not.toHaveBeenCalled()
+    expect(noteWindows.openedNoteWindows()).toEqual([])
 
     // Shift-click from the anchor (third) back to first selects the whole range.
     act(() => {
@@ -876,6 +865,7 @@ describe('TasksScreen', () => {
     insertTask.mockResolvedValue({
       created: { astPath: [0], markdown: '', breadcrumbs: [], checked: false },
       moved: [],
+      updatedAt: 0,
     })
     getOpenTasks.mockResolvedValue([
       task({
@@ -890,7 +880,7 @@ describe('TasksScreen', () => {
 
     await view.findByText('a')
     await userEvent.click(await view.findByRole('button', { name: 'Add a task to Project' }))
-    await waitFor(() => expect(insertTask).toHaveBeenCalledWith('notes/proj.md', 1))
+    await waitFor(() => expect(insertTask).toHaveBeenCalledWith('notes/proj.md'))
     // The new row's editor opens, ready to type.
     await view.findByTestId('task-editor')
     await view.unmount()
@@ -913,6 +903,7 @@ describe('TasksScreen', () => {
           to: { astPath: [2], markdown: 'later', breadcrumbs: [], checked: false },
         },
       ],
+      updatedAt: 0,
     })
     const view = await renderScreen()
 
@@ -925,7 +916,6 @@ describe('TasksScreen', () => {
       expect(writeTask).toHaveBeenCalledWith(
         expect.objectContaining({ notePath: 'notes/proj.md', astPath: [2] }),
         [{ kind: 'remove' }],
-        1,
       ),
     )
     await view.unmount()
@@ -964,7 +954,7 @@ describe('TasksScreen', () => {
     await view.findByRole('button', { name: 'first' })
     await userEvent.keyboard('{Enter}')
     // Nothing was selected, so the new task lands in today's daily note.
-    await waitFor(() => expect(insertTask).toHaveBeenCalledWith('daily/2026-06-14.md', 1))
+    await waitFor(() => expect(insertTask).toHaveBeenCalledWith('daily/2026-06-14.md'))
     // The optimistic empty row mounts its inline editor, ready to type into.
     await view.findByTestId('task-editor')
     await view.unmount()
@@ -994,7 +984,6 @@ describe('TasksScreen', () => {
       expect(writeTask).toHaveBeenCalledWith(
         expect.objectContaining({ notePath: 'daily/2026-06-14.md' }),
         [{ kind: 'remove' }],
-        1,
       ),
     )
     await view.unmount()
@@ -1025,11 +1014,9 @@ describe('TasksScreen', () => {
     await userEvent.click(view.getByRole('button', { name: 'delete-empty-edit' }))
 
     await waitFor(() =>
-      expect(writeTask).toHaveBeenCalledWith(
-        expect.objectContaining({ notePath: 'notes/b.md' }),
-        [{ kind: 'remove' }],
-        1,
-      ),
+      expect(writeTask).toHaveBeenCalledWith(expect.objectContaining({ notePath: 'notes/b.md' }), [
+        { kind: 'remove' },
+      ]),
     )
     // Lands on the previous row, whose editor now opens.
     await view.findByText('editing: first')
@@ -1063,6 +1050,7 @@ describe('TasksScreen', () => {
     continueTaskInContext.mockResolvedValue({
       created: { astPath: [3], markdown: '', breadcrumbs: [], checked: false },
       moved: [],
+      updatedAt: 0,
     })
     getOpenTasks.mockResolvedValue([
       task({
@@ -1084,7 +1072,6 @@ describe('TasksScreen', () => {
       expect(continueTaskInContext).toHaveBeenCalledWith(
         expect.objectContaining({ notePath: 'notes/a.md', astPath: [2] }),
         'edited content',
-        1,
       ),
     )
     expect(insertTask).not.toHaveBeenCalled()
@@ -1105,6 +1092,7 @@ describe('TasksScreen', () => {
           to: { astPath: [56], markdown: 'later', breadcrumbs: [], checked: false },
         },
       ],
+      updatedAt: 0,
     })
     getOpenTasks.mockResolvedValue([
       task({
@@ -1136,7 +1124,6 @@ describe('TasksScreen', () => {
           breadcrumbs: ['StartupToolbox', 'Reflections'],
         }),
         'edited content',
-        1,
       ),
     )
     expect(insertTask).not.toHaveBeenCalled()
@@ -1169,12 +1156,13 @@ describe('TasksScreen', () => {
       expect(writeTask).toHaveBeenCalledWith(
         expect.objectContaining({ notePath: 'notes/a.md', markdown: 'first' }),
         [{ kind: 'setMarkdown', markdown: 'edited content' }],
-        1,
       ),
     )
     expect(insertTask).not.toHaveBeenCalled()
     expect(await view.findByRole('button', { name: 'edited content' })).toBeDefined()
-    expect(fail).toHaveBeenCalledWith('This note is open.')
+    expect(operations.snapshot()).toContainEqual(
+      expect.objectContaining({ status: 'failed', message: 'This note is open.' }),
+    )
     await view.unmount()
   })
 
@@ -1199,7 +1187,6 @@ describe('TasksScreen', () => {
       expect(continueTaskInContext).toHaveBeenCalledWith(
         expect.objectContaining({ notePath: 'notes/a.md', breadcrumbs: ['Project'] }),
         null,
-        1,
       ),
     )
     await view.unmount()
@@ -1226,7 +1213,6 @@ describe('TasksScreen', () => {
       expect(continueTaskInContext).toHaveBeenCalledWith(
         expect.objectContaining({ notePath: 'notes/a.md' }),
         '',
-        1,
       ),
     )
     expect(writeTask).not.toHaveBeenCalled()
@@ -1261,7 +1247,7 @@ describe('TasksScreen', () => {
   })
 
   it('does not reopen an already-completed task when ⌘↵ hits the selection', async () => {
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     getOpenTasks.mockResolvedValue([
       task({
         notePath: 'notes/a.md',
@@ -1288,11 +1274,9 @@ describe('TasksScreen', () => {
     await userEvent.keyboard('{ControlOrMeta>}{Enter}{/ControlOrMeta}')
     // Only the open row toggles; the completed one is left untouched.
     await waitFor(() => expect(writesOf('toggle')).toHaveLength(1))
-    expect(writeTask).toHaveBeenCalledWith(
-      expect.objectContaining({ notePath: 'notes/a.md' }),
-      [{ kind: 'toggle' }],
-      1,
-    )
+    expect(writeTask).toHaveBeenCalledWith(expect.objectContaining({ notePath: 'notes/a.md' }), [
+      { kind: 'toggle' },
+    ])
     await view.unmount()
   })
 
@@ -1322,11 +1306,9 @@ describe('TasksScreen', () => {
     await userEvent.click(await view.findByText('20'))
 
     await waitFor(() => expect(writesOf('setMarkdown')).toHaveLength(2))
-    expect(writeTask).toHaveBeenCalledWith(
-      expect.objectContaining({ notePath: 'notes/a.md' }),
-      [{ kind: 'setMarkdown', markdown: 'plan [[2026-06-20]]' }],
-      1,
-    )
+    expect(writeTask).toHaveBeenCalledWith(expect.objectContaining({ notePath: 'notes/a.md' }), [
+      { kind: 'setMarkdown', markdown: 'plan [[2026-06-20]]' },
+    ])
     await view.unmount()
   })
 
@@ -1354,16 +1336,12 @@ describe('TasksScreen', () => {
     await userEvent.click(view.getByRole('button', { name: /Convert to bullet 2/ }))
 
     await waitFor(() => expect(writesOf('toBullet')).toHaveLength(2))
-    expect(writeTask).toHaveBeenCalledWith(
-      expect.objectContaining({ notePath: 'notes/a.md' }),
-      [{ kind: 'toBullet' }],
-      1,
-    )
-    expect(writeTask).toHaveBeenCalledWith(
-      expect.objectContaining({ notePath: 'notes/b.md' }),
-      [{ kind: 'toBullet' }],
-      1,
-    )
+    expect(writeTask).toHaveBeenCalledWith(expect.objectContaining({ notePath: 'notes/a.md' }), [
+      { kind: 'toBullet' },
+    ])
+    expect(writeTask).toHaveBeenCalledWith(expect.objectContaining({ notePath: 'notes/b.md' }), [
+      { kind: 'toBullet' },
+    ])
     // The converted rows are no longer checkboxes, so they leave the view.
     await waitFor(() => expect(view.queryByText('plan')).toBeNull())
     expect(view.queryByText('ship')).toBeNull()
@@ -1420,7 +1398,6 @@ describe('TasksScreen', () => {
       expect(writeTask).toHaveBeenCalledWith(
         expect.objectContaining({ notePath: 'notes/a.md', astPath: [2] }),
         [{ kind: 'setMarkdown', markdown: 'edited content' }, { kind: 'toBullet' }],
-        1,
       ),
     )
     await waitFor(() => expect(view.queryByText('plan')).toBeNull())
@@ -1442,11 +1419,10 @@ describe('TasksScreen', () => {
     await userEvent.click(await view.findByRole('button', { name: 'plan' }))
     await userEvent.click(view.getByRole('button', { name: 'convert-edited' }))
     await waitFor(() =>
-      expect(writeTask).toHaveBeenCalledWith(
-        expect.anything(),
-        [{ kind: 'setMarkdown', markdown: 'edited content' }, { kind: 'toBullet' }],
-        1,
-      ),
+      expect(writeTask).toHaveBeenCalledWith(expect.anything(), [
+        { kind: 'setMarkdown', markdown: 'edited content' },
+        { kind: 'toBullet' },
+      ]),
     )
     expect(writesOf('setMarkdown')).toHaveLength(0)
     expect(writesOf('toBullet')).toHaveLength(0)
@@ -1529,7 +1505,6 @@ describe('TasksScreen', () => {
           markdown: 'project task',
         }),
         [{ kind: 'toggle' }],
-        1,
       ),
     )
     // V1's middle state: the row stays visible, struck, until archived.
@@ -1549,8 +1524,7 @@ describe('TasksScreen', () => {
         updatedAt: 100,
       }),
     ])
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    const view = await renderScreen(client)
+    const view = await renderScreen()
 
     await userEvent.click(await view.findByRole('button', { name: 'Complete: project task' }))
     await view.findByRole('button', { name: 'Reopen: project task' })
@@ -1569,7 +1543,7 @@ describe('TasksScreen', () => {
         updatedAt: 200,
       }),
     ])
-    await client.invalidateQueries({ queryKey: queryKeys.index.all })
+    await app.tasks.refresh()
 
     await view.findByRole('button', { name: 'Complete: project task' })
     expect(view.queryByRole('button', { name: 'Reopen: project task' })).toBeNull()
@@ -1586,8 +1560,7 @@ describe('TasksScreen', () => {
       updatedAt: 100,
     })
     getOpenTasks.mockResolvedValue([staleRow])
-    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    const view = await renderScreen(client)
+    const view = await renderScreen()
 
     await userEvent.click(await view.findByRole('button', { name: 'Complete: project task' }))
     await view.findByRole('button', { name: 'Reopen: project task' })
@@ -1595,7 +1568,7 @@ describe('TasksScreen', () => {
     // An unrelated invalidation refetches before the completion's reindex lands:
     // the index still returns the pre-completion row (same updatedAt). The row
     // must stay struck rather than flicker back to open.
-    await client.invalidateQueries({ queryKey: queryKeys.index.all })
+    await app.tasks.refresh()
 
     await view.findByRole('button', { name: 'Reopen: project task' })
     expect(view.queryByRole('button', { name: 'Complete: project task' })).toBeNull()
@@ -1626,7 +1599,6 @@ describe('TasksScreen', () => {
           markdown: 'project task',
         }),
         [{ kind: 'toggle' }],
-        1,
       ),
     )
     await view.unmount()
@@ -1660,13 +1632,11 @@ describe('TasksScreen', () => {
       1,
       expect.objectContaining({ notePath: 'notes/a.md', astPath: [5], markdown: 'first task' }),
       [{ kind: 'toggle' }],
-      1,
     )
     expect(writeTask).toHaveBeenNthCalledWith(
       2,
       expect.objectContaining({ notePath: 'notes/b.md', astPath: [9], markdown: 'second task' }),
       [{ kind: 'toggle' }],
-      1,
     )
     await view.findByRole('button', { name: 'Reopen: first task' })
     await view.findByRole('button', { name: 'Reopen: second task' })
@@ -1674,7 +1644,7 @@ describe('TasksScreen', () => {
   })
 
   it('reopens selected checked tasks when a checked selected checkbox is clicked', async () => {
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     getOpenTasks.mockResolvedValue([
       task({
         notePath: 'notes/a.md',
@@ -1705,7 +1675,6 @@ describe('TasksScreen', () => {
     expect(writeTask).toHaveBeenCalledWith(
       expect.objectContaining({ notePath: 'notes/b.md', astPath: [9], markdown: 'done task' }),
       [{ kind: 'toggle' }],
-      1,
     )
     await view.findByRole('button', { name: 'Complete: open task' })
     await view.findByRole('button', { name: 'Complete: done task' })
@@ -1736,7 +1705,6 @@ describe('TasksScreen', () => {
           markdown: 'project task',
         }),
         [{ kind: 'setMarkdown', markdown: 'edited content' }, { kind: 'toggle' }],
-        1,
       ),
     )
     await view.unmount()
@@ -1801,7 +1769,6 @@ describe('TasksScreen', () => {
           markdown: 'project task',
         }),
         [{ kind: 'toggle' }],
-        1,
       ),
     )
     await view.findByRole('button', { name: 'Complete: project task' })
@@ -1809,7 +1776,7 @@ describe('TasksScreen', () => {
   })
 
   it('reopens an archived completed task when its checkbox is clicked', async () => {
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     getOpenTasks.mockResolvedValue([])
     getCompletedTasks.mockResolvedValue([
       task({
@@ -1833,7 +1800,6 @@ describe('TasksScreen', () => {
           markdown: 'project task',
         }),
         [{ kind: 'toggle' }],
-        1,
       ),
     )
     await view.findByRole('button', { name: 'Complete: project task' })
@@ -1841,14 +1807,14 @@ describe('TasksScreen', () => {
   })
 
   it('shows an open checkbox while a reopen write is pending', async () => {
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     let resolveToggle = (): void => {
       throw new Error('toggle promise was not created')
     }
     writeTask.mockImplementation(
       () =>
-        new Promise<void>((resolve) => {
-          resolveToggle = resolve
+        new Promise<TaskWriteResult>((resolve) => {
+          resolveToggle = () => resolve(WRITTEN)
         }),
     )
     getOpenTasks.mockResolvedValue([])
@@ -1876,7 +1842,7 @@ describe('TasksScreen', () => {
   })
 
   it('restores a struck task when an unchanged editor checkbox reopen fails', async () => {
-    writeTask.mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('stale index'))
+    writeTask.mockResolvedValueOnce(WRITTEN).mockRejectedValueOnce(new Error('stale index'))
     getOpenTasks.mockResolvedValue([
       task({
         notePath: 'notes/p.md',
@@ -1896,14 +1862,21 @@ describe('TasksScreen', () => {
     await view.findByTestId('task-editor')
     await userEvent.click(view.getByRole('button', { name: 'Reopen: project task' }))
 
-    await waitFor(() => expect(fail).toHaveBeenCalledWith('stale index'))
-    expect(startOperation).toHaveBeenCalledWith('Reopening task')
+    await waitFor(() =>
+      expect(operations.snapshot()).toContainEqual(
+        expect.objectContaining({
+          label: 'Reopening task',
+          status: 'failed',
+          message: 'stale index',
+        }),
+      ),
+    )
     await view.findByRole('button', { name: 'Reopen: project task' })
     await view.unmount()
   })
 
   it('reopens a selected completed task when its checkbox is clicked', async () => {
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     getOpenTasks.mockResolvedValue([])
     getCompletedTasks.mockResolvedValue([
       task({
@@ -1929,14 +1902,13 @@ describe('TasksScreen', () => {
           markdown: 'project task',
         }),
         [{ kind: 'toggle' }],
-        1,
       ),
     )
     await view.unmount()
   })
 
   it('saves an edited selected completed task before reopening it from the checkbox', async () => {
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     getOpenTasks.mockResolvedValue([])
     getCompletedTasks.mockResolvedValue([
       task({
@@ -1962,7 +1934,6 @@ describe('TasksScreen', () => {
           markdown: 'project task',
         }),
         [{ kind: 'setMarkdown', markdown: 'edited content' }, { kind: 'toggle' }],
-        1,
       ),
     )
     await view.unmount()
@@ -1989,8 +1960,15 @@ describe('TasksScreen', () => {
     await userEvent.click(view.getByRole('button', { name: 'stage-checkbox-edit' }))
     await userEvent.click(view.getByRole('button', { name: 'Reopen: project task' }))
 
-    await waitFor(() => expect(fail).toHaveBeenCalledWith('disk full'))
-    expect(startOperation).toHaveBeenCalledWith('Reopening task')
+    await waitFor(() =>
+      expect(operations.snapshot()).toContainEqual(
+        expect.objectContaining({
+          label: 'Reopening task',
+          status: 'failed',
+          message: 'disk full',
+        }),
+      ),
+    )
     await view.findByRole('button', { name: 'Reopen: project task' })
     expect(view.queryByText('edited content')).toBeNull()
     await view.unmount()
@@ -1999,7 +1977,7 @@ describe('TasksScreen', () => {
   it('keeps a completed task visible (struck) when archived tasks are shown', async () => {
     // With "show archived" on, completing must move the row into the completed
     // list (struck), not drop it until the refetch (Bugbot regression).
-    window.sessionStorage.setItem('reflect.tasks.filter.archived', 'true')
+    storage.session.set('reflect.tasks.filter.archived', 'true')
     getCompletedTasks.mockResolvedValue([])
     getOpenTasks.mockResolvedValue([
       task({
@@ -2096,8 +2074,15 @@ describe('TasksScreen', () => {
     const view = await renderScreen()
 
     await userEvent.click(await view.findByRole('button', { name: 'Complete: project task' }))
-    await waitFor(() => expect(fail).toHaveBeenCalledWith('stale index'))
-    expect(startOperation).toHaveBeenCalledWith('Completing task')
+    await waitFor(() =>
+      expect(operations.snapshot()).toContainEqual(
+        expect.objectContaining({
+          label: 'Completing task',
+          status: 'failed',
+          message: 'stale index',
+        }),
+      ),
+    )
     // Rolled back: the row returns after the failed write.
     await view.findByText('project task')
     await view.unmount()
@@ -2126,7 +2111,11 @@ describe('TasksScreen', () => {
     await view.findByRole('button', { name: 'first' })
     await userEvent.keyboard('{ControlOrMeta>}a{/ControlOrMeta}')
     await userEvent.keyboard('{ControlOrMeta>}{Enter}{/ControlOrMeta}')
-    await waitFor(() => expect(fail).toHaveBeenCalledWith('stale index'))
+    await waitFor(() =>
+      expect(operations.snapshot()).toContainEqual(
+        expect.objectContaining({ status: 'failed', message: 'stale index' }),
+      ),
+    )
     // A batch failure reconciles by refetching the index, not by restoring the
     // pre-batch snapshot (which would un-do any write that already landed).
     await waitFor(() => expect(getOpenTasks.mock.calls.length).toBeGreaterThan(1))

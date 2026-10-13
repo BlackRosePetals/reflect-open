@@ -1,12 +1,6 @@
 import { memo, useCallback, useMemo, useRef, useState, type ReactElement } from 'react'
 import type { ExitBoundaryHandler, SearchStatus } from '@meowdown/core'
-import {
-  detectConflictMarkers,
-  isDaily,
-  isTemplatePath,
-  isUntitledNotePath,
-  untitledNoteSeed,
-} from '@reflect/core'
+import { deferredCreationPolicy, detectConflictMarkers, isDaily } from '@reflect/core'
 import { BacklinksPanel } from '@/components/backlinks-panel.tsx'
 import { ConflictNoteView } from '@/components/conflict-note-view.tsx'
 import { NoteLoading } from '@/components/note-loading.tsx'
@@ -34,11 +28,11 @@ import { useLinkPreview } from '@/editor/use-link-preview.ts'
 import { useWikiLinkNavigation } from '@/editor/use-wiki-link-navigation.ts'
 import { useWikiLinkHoverPreview } from '@/editor/use-wiki-link-hover-preview.tsx'
 import { useXPostPreload } from '@/editor/use-x-post-preload.ts'
-import { isTouchEditorSurface } from '@/lib/platform-surface.ts'
 import { cn } from '@/lib/utils.ts'
 import { useGraph } from '@/providers/graph-provider.tsx'
 import { useNoteSearchQuery, useNoteSearchReport } from '@/providers/note-find-provider.tsx'
 import { useSettings } from '@/providers/settings-provider.tsx'
+import { useCoreServices } from '@/services/services-provider.tsx'
 
 interface NotePaneProps {
   /** Graph-relative path of the note to edit. */
@@ -135,31 +129,27 @@ export function NotePaneComponent({
 }: NotePaneProps): ReactElement {
   const { graph } = useGraph()
   const { settings } = useSettings()
-  const generation = graph?.generation ?? null
+  const { noteCreation, platform } = useCoreServices()
   const graphKey = graph?.root ?? null
   const dailyNote = isDaily(path)
-  const lazyCreate = lazy && (dailyNote || isUntitledNotePath(path))
-  // Templates rename via file operations only (settings, or outside the app):
-  // the rename pipeline's slug targets live under `notes/`, so tracking a
-  // template's title would move it out of `templates/`. The untitled `id:`
-  // seed is skipped for the same reason — it exists to feed that pipeline.
-  const template = isTemplatePath(path)
+  const policy = deferredCreationPolicy(path)
+  const lazyCreate = lazy && policy.lazyCreatable
   // One seed per (pane, path): a fresh seed carries a fresh `id:`, and a mere
   // re-render must not mint a new identity (the session is keyed on the seed).
   // Re-mint during render when the path changes — only the committed render's
   // seed reaches the session, so the transient stale render is harmless, and
   // this avoids writing a ref during render.
-  const needsSeed = lazyCreate && !dailyNote && !template
-  const [seed, setSeed] = useState(() => ({ path, seed: untitledNoteSeed() }))
+  const needsSeed = lazyCreate && policy.seedsUntitled
+  const [seed, setSeed] = useState(() => ({ path, seed: noteCreation.untitledNoteSeed() }))
   if (needsSeed && seed.path !== path) {
-    setSeed({ path, seed: untitledNoteSeed() })
+    setSeed({ path, seed: noteCreation.untitledNoteSeed() })
   }
-  const document = useNoteDocument(path, generation, {
+  const document = useNoteDocument(path, {
     createIfMissing: lazyCreate,
     // Every editable regular note maintains title-addressed links and
     // title-mirroring backlink displays. The coordinator separately limits
     // title-derived file moves to Reflect-managed notes.
-    trackRenames: !dailyNote && !template,
+    trackRenames: policy.trackRenames,
     // A missing ordinary note opens as a name-me template (old Reflect's
     // new-note flow): the seed — `id:` frontmatter plus an empty H1 the
     // caret lands in, ghosted "Untitled" by the title placeholder — only
@@ -176,27 +166,17 @@ export function NotePaneComponent({
     saveFile,
     resolveFileInfo,
     saveError,
-  } = useAssetPersistence(generation, path)
+  } = useAssetPersistence(path)
   const renderWikilinkHoverCard = useWikiLinkHoverPreview({
-    generation,
-    graphKey: graph?.root ?? null,
     dateFormat: settings.dateFormat,
   })
-  const onWikiLinkClick = useWikiLinkNavigation(generation)
-  const onLinkClick = useMarkdownLinkClick(generation, path)
+  const onWikiLinkClick = useWikiLinkNavigation()
+  const onLinkClick = useMarkdownLinkClick(path)
   const onTagClick = useTagNavigation()
   const { onWikilinkSearch, onTagSearch } = useEditorAutocomplete()
   const linkPreviewSession = useMemo(
-    () =>
-      generation === null || graphKey === null
-        ? null
-        : {
-            path,
-            generation,
-            graphKey,
-            sessionEpoch: document.sessionEpoch,
-          },
-    [path, generation, graphKey, document.sessionEpoch],
+    () => (graphKey === null ? null : { path, graphKey, sessionEpoch: document.sessionEpoch }),
+    [path, graphKey, document.sessionEpoch],
   )
   const resolveLinkPreview = useLinkPreview(linkPreviewSession)
 
@@ -355,7 +335,7 @@ export function NotePaneComponent({
         onWikiLinkClick={onWikiLinkClick}
         onLinkClick={onLinkClick}
         resolveLinkPreview={resolveLinkPreview}
-        {...(generation !== null && !isTouchEditorSurface() ? { renderWikilinkHoverCard } : {})}
+        {...(graph !== null && !platform.surface.touchEditor ? { renderWikilinkHoverCard } : {})}
         onTagClick={onTagClick}
         onWikilinkSearch={onWikilinkSearch}
         onTagSearch={onTagSearch}

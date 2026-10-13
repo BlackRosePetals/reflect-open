@@ -1,16 +1,14 @@
 import { useId, useState, type ReactElement } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import {
   aiProvider,
   aiProviderRequiresApiKey,
   errorMessage,
-  listNotes,
+  marketingVersion,
   CHAT_SYSTEM_PROMPT_MAX_LENGTH,
   TRANSCRIPTION_PROMPT_MAX_LENGTH,
   normalizeChatSystemPrompt,
   normalizeTranscriptionPrompt,
-  presentOfferCodeRedeemSheet,
-  syncAppStore,
   type AiPrompt,
   type AiProviderConfig,
   type DateFormat,
@@ -23,10 +21,7 @@ import { useAiPrompts } from '@/hooks/use-ai-prompts.ts'
 import { useAiProviders } from '@/hooks/use-ai-providers.ts'
 import { useAppVersion } from '@/hooks/use-app-version.ts'
 import { usePaywallRequested } from '@/hooks/use-paywall-requested.ts'
-import { useBridgeReady } from '@/hooks/use-bridge-ready.ts'
 import { useCrashTest, useDebugUnlockTap } from '@/hooks/use-debug-unlock.ts'
-import { marketingVersion } from '@/lib/marketing-version.ts'
-import { openUrlSync } from '@/lib/open-url.ts'
 import { queryKeys } from '@/lib/query-client.ts'
 import { AddAiProviderDrawer } from '@/mobile/add-ai-provider-drawer.tsx'
 import { AiPromptDrawer } from '@/mobile/ai-prompt-drawer.tsx'
@@ -45,10 +40,7 @@ import {
   SettingsValueRow,
   type SegmentedOption,
 } from '@/mobile/settings-list.tsx'
-import {
-  refetchActiveSubscription,
-  useActiveSubscription,
-} from '@/mobile/use-active-subscription.ts'
+import { useActiveSubscription } from '@/mobile/use-active-subscription.ts'
 import { useAppStoreEnvironment } from '@/mobile/use-app-store-environment.ts'
 import {
   classicAccessMessage,
@@ -57,6 +49,8 @@ import {
 } from '@/mobile/use-classic-access.ts'
 import { useMobileSyncStatus } from '@/mobile/use-sync-status.ts'
 import { useGraph } from '@/providers/graph-provider.tsx'
+import { useMobileAppServices } from '@/mobile/mobile-services.ts'
+import { useAppServices } from '@/services/services-provider.tsx'
 import { formatFullDate } from '@/lib/dates.ts'
 import { useSettings } from '@/providers/settings-provider.tsx'
 import { useSyncContext } from '@/providers/sync-provider.tsx'
@@ -111,7 +105,8 @@ export function MobileSettings(): ReactElement {
   const subscription = useActiveSubscription()
   const classicAccess = useClassicAccess()
   const classicSignOut = useClassicSignOut()
-  const queryClient = useQueryClient()
+  const { paywall, noteList, logger } = useMobileAppServices()
+  const { opener } = useAppServices()
   const [, setPaywallRequested] = usePaywallRequested()
   const [restorePending, setRestorePending] = useState(false)
   const [redeemPending, setRedeemPending] = useState(false)
@@ -121,8 +116,7 @@ export function MobileSettings(): ReactElement {
     setRestorePending(true)
     setSubscriptionMessage(null)
     try {
-      await syncAppStore()
-      const found = await refetchActiveSubscription(queryClient)
+      const found = await paywall.restore()
       if (found === null) {
         setSubscriptionMessage('No previous purchase found for this Apple account.')
       }
@@ -137,10 +131,7 @@ export function MobileSettings(): ReactElement {
     setRedeemPending(true)
     setSubscriptionMessage(null)
     try {
-      await presentOfferCodeRedeemSheet()
-      // A redeemed code normally arrives as a purchaseUpdated event; the
-      // refetch here covers a sheet that closed without emitting one.
-      subscription.invalidate()
+      await paywall.redeemCode()
     } catch {
       setSubscriptionMessage('Could not open the redemption sheet. Try again.')
     } finally {
@@ -176,11 +167,10 @@ export function MobileSettings(): ReactElement {
   const [managedProvider, setManagedProvider] = useState<AiProviderConfig | null>(null)
   const [manageOpen, setManageOpen] = useState(false)
 
-  const bridgeReady = useBridgeReady()
   const { data: notes } = useQuery({
     queryKey: queryKeys.index.mobileNoteCount(graph?.root),
-    queryFn: () => listNotes(),
-    enabled: bridgeReady && graph !== null,
+    queryFn: () => noteList.listNotes(),
+    enabled: graph !== null,
   })
 
   const backup = sync?.backup ?? null
@@ -204,7 +194,7 @@ export function MobileSettings(): ReactElement {
       await sync.disconnectGraph()
       await sync.signOut()
     } catch (err) {
-      console.error('GitHub disconnect failed:', errorMessage(err))
+      logger.error('GitHub disconnect failed:', errorMessage(err))
     } finally {
       setDisconnecting(false)
     }
@@ -436,7 +426,7 @@ export function MobileSettings(): ReactElement {
                 <SettingsActionRow
                   label="Manage Subscription"
                   onPress={() => {
-                    openUrlSync('https://apps.apple.com/account/subscriptions')
+                    opener.openUrlSync('https://apps.apple.com/account/subscriptions')
                   }}
                 />
               ) : null}
@@ -473,7 +463,7 @@ export function MobileSettings(): ReactElement {
               <SettingsActionRow
                 label="Terms of Use"
                 onPress={() => {
-                  openUrlSync(TERMS_OF_USE_URL)
+                  opener.openUrlSync(TERMS_OF_USE_URL)
                 }}
               />
             </SettingsGroup>
@@ -492,7 +482,7 @@ export function MobileSettings(): ReactElement {
             <SettingsActionRow
               label="Privacy Policy"
               onPress={() => {
-                openUrlSync(PRIVACY_POLICY_URL)
+                opener.openUrlSync(PRIVACY_POLICY_URL)
               }}
             />
           </SettingsGroup>

@@ -15,10 +15,10 @@ import { addDaysIso, formatDayLabel } from '@/lib/dates.ts'
 import type { TaskActions } from '@/lib/tasks/use-task-actions.ts'
 import { cn } from '@/lib/utils.ts'
 import { hapticImpactLight } from '@/mobile/haptics.ts'
+import { useMobileAppServices } from '@/mobile/mobile-services.ts'
 import { withDraftDueDate } from '@/mobile/task-draft.ts'
 import { TaskScheduleGrid } from '@/mobile/task-schedule-grid.tsx'
 import { useTaskSheetFinalizer } from '@/mobile/use-task-sheet-finalizer.ts'
-import { useGraph } from '@/providers/graph-provider.tsx'
 import { useSettings } from '@/providers/settings-provider.tsx'
 
 interface MobileTaskEditSheetProps {
@@ -63,11 +63,10 @@ export function MobileTaskEditSheet({
   onOpenNote,
   autoFocusEditor = false,
 }: MobileTaskEditSheetProps): ReactElement {
-  const { graph } = useGraph()
+  const { haptics } = useMobileAppServices()
   const { settings } = useSettings()
-  const generation = graph?.generation ?? null
-  const navigateWikiLink = useWikiLinkNavigation(generation)
-  const onLinkClick = useMarkdownLinkClick(generation, null)
+  const navigateWikiLink = useWikiLinkNavigation()
+  const onLinkClick = useMarkdownLinkClick(null)
   const navigateTag = useTagNavigation()
   const { onWikilinkSearch, onTagSearch } = useEditorAutocomplete()
   const [showCalendar, setShowCalendar] = useState(false)
@@ -130,7 +129,7 @@ export function MobileTaskEditSheet({
   const finishEdit = useCallback(() => finishRef.current(), [])
 
   const complete = (): void => {
-    hapticImpactLight()
+    hapticImpactLight(haptics)
     const result = resolve()
     if (result.type === 'commit') {
       actions.editAndToggle(task, result.content)
@@ -145,7 +144,7 @@ export function MobileTaskEditSheet({
   }
 
   const convertToBullet = (): void => {
-    hapticImpactLight()
+    hapticImpactLight(haptics)
     const result = resolve()
     if (result.type === 'commit') {
       actions.editAndConvertToBullet(task, result.content)
@@ -160,7 +159,7 @@ export function MobileTaskEditSheet({
   }
 
   const openNote = (): void => {
-    hapticImpactLight()
+    hapticImpactLight(haptics)
     closeNavigate()
     onOpenNote(task.notePath)
   }
@@ -178,13 +177,13 @@ export function MobileTaskEditSheet({
   }
 
   const remove = (): void => {
-    hapticImpactLight()
+    hapticImpactLight(haptics)
     actions.remove([task])
     closeHandled()
   }
 
   const schedule = (isoDate: string | null): void => {
-    hapticImpactLight()
+    hapticImpactLight(haptics)
     // Base the rewrite on the freshest draft, then keep every mirror in step
     // by hand: setMarkdown is silent (no onChange echo), so neither the live
     // mirror nor the state (chip highlights) updates on its own.
@@ -196,7 +195,7 @@ export function MobileTaskEditSheet({
   }
 
   const toggleCalendar = (): void => {
-    hapticImpactLight()
+    hapticImpactLight(haptics)
     setShowCalendar((showing) => !showing)
   }
 
