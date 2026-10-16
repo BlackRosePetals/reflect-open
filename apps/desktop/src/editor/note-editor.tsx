@@ -204,7 +204,7 @@ interface NoteEditorProps {
    * renders no card. Must be a stable function: a new identity re-runs the
    * resolution for the currently hovered link.
    */
-  renderWikilinkHoverCard?: WikilinkHoverRenderer
+  renderWikilinkHoverCard?: WikilinkHoverRenderer | undefined
   /** Click on an inline `#tag`. The tag name arrives without the leading `#`. */
   onTagClick?: (tag: string) => void
   /** Search notes for the `[[` autocomplete menu. */

@@ -33,7 +33,6 @@ export {
   type ConnectExistingResult,
 } from './sync/backup-service.ts'
 export { isICloudRoot } from './sync/icloud-sync-service.ts'
-export { type ConflictResolutionService } from './sync/conflict-resolution-service.ts'
 export { type GistPublishService } from './sync/gist-publish-service.ts'
 export { isMobilePlatform, type AppPlatform } from './ports/platform-facts.ts'
 export { createSystemClock, type ClockService, type TimerHandle } from './ports/clock-service.ts'
@@ -386,16 +385,11 @@ export {
   unresolved,
   splitFrontmatter,
   upsertFrontmatter,
-  detectConflictMarkers,
-  parseConflictMarkers,
-  resolveConflictMarkers,
-  type ConflictSide,
   displayNoteTitle,
   foldKey,
   foldTag,
   foldFallbackTitleKey,
   isTagName,
-  type ConflictResolution,
   type Frontmatter,
   type Span,
   type Heading,
@@ -417,7 +411,6 @@ export {
   type BacklinkContextPage,
   type BacklinkSourceCursor,
   type SnippetTask,
-  type ConflictedNote,
   type DuplicateIdGroup,
   type NoteRow,
   type NoteListEntry,

@@ -65,9 +65,11 @@ function sessionDeps(app: TestCoreServices) {
       fileChanges,
       indexLifecycle,
       progress: app.progress,
+      clock,
       activity,
       platform: app.platform,
       persistenceFlush: app.persistenceFlush,
+      icloudNative,
       logger,
     },
     icloudSync: {
@@ -78,6 +80,7 @@ function sessionDeps(app: TestCoreServices) {
       activity,
       clock,
       logger,
+      progress: app.progress,
     },
     icloudDownload: { icloudNative, activity, clock, logger },
   }
@@ -182,7 +185,7 @@ describe('createGraphServices', () => {
     await context.app.settings.whenLoaded()
 
     expect(context.graph.backup).toBe(context.backup)
-    expect(context.backups).toEqual([{ generation: 3, indexGeneration: 5 }])
+    expect(context.backups).toEqual([{ root: '/g', generation: 3, indexGeneration: 5 }])
     expect(context.backup.calls()).toEqual([{ method: 'start' }])
     expect(context.chats).toEqual([{ attached: 1, detached: 0 }])
     expect(context.app.attachments.watchers()).toBe(1)
@@ -203,7 +206,13 @@ describe('createGraphServices', () => {
       lifecycles: { icloudSync: true },
     })
 
-    expect(context.backups).toEqual([{ generation: 3, indexGeneration: null }])
+    expect(context.backups).toEqual([
+      {
+        root: '/Users/me/Library/Mobile Documents/iCloud~reflect/Documents/notes',
+        generation: 3,
+        indexGeneration: null,
+      },
+    ])
     expect(context.icloudSyncs.map((sync) => sync.options.indexGeneration)).toEqual([null])
     expect(context.app.capture.sessions()).toHaveLength(1)
     expect(context.app.attachments.watchers()).toBe(1)

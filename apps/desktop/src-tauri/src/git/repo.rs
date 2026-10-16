@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use git2::{Repository, RepositoryInitOptions, Signature};
+use git2::{IndexEntry, IndexTime, Oid, Repository, RepositoryInitOptions, Signature};
 
 use crate::error::{AppError, AppResult};
 use crate::graph_gitignore;
@@ -21,9 +21,7 @@ pub(super) fn open_or_init(root: &Path) -> AppResult<Repository> {
     let mut opts = RepositoryInitOptions::new();
     opts.initial_head(DEFAULT_BRANCH);
     let repo = Repository::init_opts(root, &opts)?;
-    // A repo created inside a file-sync folder (iCloud Drive) must not sync
-    // through it — two devices' object stores merging file-by-file corrupts
-    // the repository (Plan 21). Pre-existing repos are marked at graph open.
+    // Two devices syncing one object store through iCloud corrupts it.
     crate::fs::mark_dir_local_only(&root.join(".git"));
     Ok(repo)
 }
@@ -36,38 +34,98 @@ pub(super) fn open_existing(root: &Path) -> AppResult<Repository> {
     Ok(Repository::open(root)?)
 }
 
-/// Refuse to operate on a repository mid-operation (a rebase/merge the user
-/// started with the git CLI). Guessing here could destroy their state.
-pub(super) fn ensure_clean_state(repo: &Repository) -> AppResult<()> {
-    if repo.state() != git2::RepositoryState::Clean {
-        return Err(AppError::io(format!(
-            "the backup repository has a {:?} in progress; finish or abort it with git first",
-            repo.state()
-        )));
+/// Clear a merge or rebase state this app did not start (a git CLI left it).
+/// The working tree is untouched: its content commits like any other edit.
+pub(super) fn clear_foreign_state(repo: &Repository) -> AppResult<()> {
+    let state = repo.state();
+    if state != git2::RepositoryState::Clean {
+        tracing::warn!(?state, "clearing a repository state this app did not start");
+        repo.cleanup_state()?;
     }
     Ok(())
 }
 
 /// The branch HEAD points at. Works on an unborn HEAD (where `repo.head()`
-/// errors); a detached HEAD is a foreign state we refuse to sync from.
+/// errors). A detached HEAD reports the backup branch that
+/// [`reattach_head`] would reattach.
 pub(super) fn current_branch(repo: &Repository) -> AppResult<String> {
     let head = repo.find_reference("HEAD")?;
     match head.symbolic_target()? {
         Some(target) => Ok(target.trim_start_matches("refs/heads/").to_string()),
-        None => Err(AppError::io(
-            "the backup repository is on a detached HEAD; check out a branch with git first",
-        )),
+        None => Ok(backup_branch(repo)),
     }
 }
 
+/// The local branch a detached HEAD belongs to: one whose tip is the HEAD
+/// commit or an ancestor of it, else one that tracks `origin`, else `main`,
+/// else any local branch.
+fn backup_branch(repo: &Repository) -> String {
+    let names: Vec<String> = repo
+        .branches(Some(git2::BranchType::Local))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|(branch, _)| branch.name().ok().flatten().map(str::to_string))
+        .collect();
+    let head = repo.head().ok().and_then(|head| head.target());
+    let behind_head = |name: &&String| {
+        let tip = repo.refname_to_id(&format!("refs/heads/{name}")).ok();
+        match (head, tip) {
+            (Some(head), Some(tip)) => {
+                head == tip || repo.graph_descendant_of(head, tip).unwrap_or(false)
+            }
+            _ => false,
+        }
+    };
+    let tracked = |name: &&String| {
+        repo.find_reference(&format!("refs/remotes/origin/{name}"))
+            .is_ok()
+    };
+    names
+        .iter()
+        .find(behind_head)
+        .or_else(|| names.iter().find(tracked))
+        .or_else(|| names.iter().find(|name| *name == DEFAULT_BRANCH))
+        .or(names.first())
+        .cloned()
+        .unwrap_or_else(|| DEFAULT_BRANCH.to_string())
+}
+
+/// Attach a detached HEAD to the backup branch, moving the branch forward to
+/// HEAD; HEAD stays detached while [`branch_tip_ahead_of_detached_head`] is set.
+pub(super) fn reattach_head(repo: &Repository) -> AppResult<()> {
+    let head = repo.find_reference("HEAD")?;
+    if head.symbolic_target()?.is_some() || branch_tip_ahead_of_detached_head(repo)?.is_some() {
+        return Ok(());
+    }
+    let commit = repo.head()?.peel_to_commit()?;
+    let name = backup_branch(repo);
+    tracing::warn!(%name, "reattaching a detached HEAD to the backup branch");
+    repo.branch(&name, &commit, true)?;
+    repo.set_head(&format!("refs/heads/{name}"))?;
+    Ok(())
+}
+
+/// The backup branch tip when HEAD is detached and the tip is neither the
+/// HEAD commit nor an ancestor of it: moving the branch to HEAD would drop
+/// commits, so the tip must be merged into HEAD first.
+pub(super) fn branch_tip_ahead_of_detached_head(repo: &Repository) -> AppResult<Option<Oid>> {
+    let head = repo.find_reference("HEAD")?;
+    if head.symbolic_target()?.is_some() {
+        return Ok(None);
+    }
+    let head = repo.head()?.peel_to_commit()?.id();
+    let name = backup_branch(repo);
+    let Ok(tip) = repo.refname_to_id(&format!("refs/heads/{name}")) else {
+        return Ok(None);
+    };
+    let behind = tip != head && !repo.graph_descendant_of(head, tip)?;
+    Ok(behind.then_some(tip))
+}
+
 /// Rename the local branch to `name` so fetch/merge/push target the branch
-/// the backup repo actually uses.
-///
-/// HEAD's commit never changes here, so the working tree — the user's notes —
-/// is never rewritten and no checkout is needed. A stale local branch already
-/// carrying `name` loses the *name* (force rename), not our content: the
-/// local state always wins the collision, and the remote's history integrates
-/// through the next fetch + merge like any other divergence.
+/// the backup repo uses. HEAD's commit and the working tree do not change.
+/// A stale local branch already named `name` loses the name (force rename).
 pub(super) fn align_branch(repo: &Repository, name: &str) -> AppResult<()> {
     let current = current_branch(repo)?;
     if current == name {
@@ -76,8 +134,7 @@ pub(super) fn align_branch(repo: &Repository, name: &str) -> AppResult<()> {
     if let Ok(reference) = repo.find_reference(&format!("refs/heads/{current}")) {
         git2::Branch::wrap(reference).rename(name, true)?;
     }
-    // With no current ref (unborn HEAD) there is nothing to rename — pointing
-    // HEAD at the new name is enough; the first commit creates the branch.
+    // An unborn HEAD has no ref to rename; the first commit creates it.
     repo.set_head(&format!("refs/heads/{name}"))?;
     Ok(())
 }
@@ -89,6 +146,24 @@ pub(super) fn signature(repo: &Repository) -> AppResult<Signature<'static>> {
         return Ok(sig);
     }
     Ok(Signature::now("Reflect", "backup@reflect.app")?)
+}
+
+/// A stage-0 index entry for `path` with zeroed stat data.
+pub(super) fn stage0_entry(path: &str, id: Oid, mode: u32) -> IndexEntry {
+    IndexEntry {
+        ctime: IndexTime::new(0, 0),
+        mtime: IndexTime::new(0, 0),
+        dev: 0,
+        ino: 0,
+        mode,
+        uid: 0,
+        gid: 0,
+        file_size: 0,
+        id,
+        flags: path.len().min(0x0FFF) as u16,
+        flags_extended: 0,
+        path: path.as_bytes().to_vec(),
+    }
 }
 
 /// Make sure graph repositories carry Reflect's safe ignore defaults. The graph

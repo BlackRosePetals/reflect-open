@@ -14,7 +14,13 @@ import {
 import { createTestPlatformService } from '../testing/platform.ts'
 import { createTestSecretStoreService } from '../testing/secrets.ts'
 import { createTestActivityPort, type TestActivityPort } from '../testing/shell.ts'
-import { createTestGitRepositoryService, createTestGithubAuthService } from '../testing/sync.ts'
+import {
+  createTestGitRepositoryService,
+  createTestGithubAuthService,
+  createTestICloudNativeService,
+  type TestGitRepositoryService,
+  type TestICloudNativeService,
+} from '../testing/sync.ts'
 import { createSyncEngineFactory } from './engine.ts'
 import { createGithubRepoService } from './github-repo-service.ts'
 import {
@@ -24,9 +30,10 @@ import {
   type BackupState,
 } from './backup-service.ts'
 import type {
+  ChangedFile,
   CommitOutcome,
   GitStatus,
-  MergeOutcome,
+  PullOutcome,
   PushOutcome,
 } from './git-repository-service.ts'
 
@@ -37,6 +44,7 @@ let logger: TestLoggerService
 let fileChanges: TestFileChangeService
 let persistenceFlush: TestPersistenceFlushService
 let backupDeps: BackupServiceDeps
+let icloudNative: TestICloudNativeService
 
 beforeEach(() => {
   http = createTestHttpService()
@@ -45,6 +53,7 @@ beforeEach(() => {
   logger = createTestLoggerService()
   fileChanges = createTestFileChangeService()
   persistenceFlush = createTestPersistenceFlushService()
+  icloudNative = createTestICloudNativeService()
 })
 
 const USER_URL = 'https://api.github.com/user'
@@ -55,8 +64,19 @@ const USER_URL = 'https://api.github.com/user'
 const GENERATION = 3
 
 const AUTH = JSON.stringify({ kind: 'pat', token: 'ghp_abc' })
-const CLEAN_COMMIT: CommitOutcome = { committed: false, sha: null, ahead: 0, skippedLargeFiles: [] }
-const UP_TO_DATE: MergeOutcome = { kind: 'upToDate', conflictedPaths: [], changedFiles: [] }
+const COMMITTED: CommitOutcome = {
+  committed: true,
+  sha: null,
+  ahead: 0,
+  skippedLargeFiles: [],
+}
+const PULLED: PullOutcome = {
+  committed: true,
+  ahead: 0,
+  skippedLargeFiles: [],
+  reviewPaths: [],
+  changedFiles: [],
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -84,13 +104,13 @@ interface FakeOptions {
    */
   gateSetup?: boolean
   /**
-   * Hold the first `mergeRemote` until `releaseMerge()` (the mid-pull window).
+   * Hold the first `pull` until `releasePull()` (the mid-pull window).
    */
-  gateMerge?: boolean
+  gatePull?: boolean
   /**
-   * Hold the second `commitAll` until `releaseCommit()` (a flush still in flight).
+   * Hold the first `commitAll` until `releaseCommit()` (a flush still in flight).
    */
-  gateSecondCommit?: boolean
+  gateCommit?: boolean
   /**
    * Make the watcher subscription throw (the unusable-watcher path).
    */
@@ -101,13 +121,17 @@ interface FakeOptions {
    */
   failSecretGet?: boolean
   /**
-   * Scripted `mergeRemote` outcome (defaults to up-to-date).
+   * Scripted `commitAll` outcome (defaults to a clean tree).
    */
-  mergeOutcome?: MergeOutcome
+  commitOutcome?: CommitOutcome
   /**
-   * Per-call merge outcomes for retry/convergence tests.
+   * Scripted `pull` outcome (defaults to up-to-date).
    */
-  mergeOutcomes?: MergeOutcome[]
+  pullOutcome?: PullOutcome
+  /**
+   * Per-call pull outcomes for retry/convergence tests.
+   */
+  pullOutcomes?: PullOutcome[]
   /**
    * Per-call push outcomes for retry/convergence tests.
    */
@@ -149,18 +173,17 @@ function fakeServices(options: FakeOptions = {}) {
       options.remoteUrl === undefined ? 'https://github.com/alex/notes.git' : options.remoteUrl,
     ahead: 0,
     behind: 0,
-    inProgress: false,
   }
   const statusGate = Promise.withResolvers<void>()
   const indexApplyGate = Promise.withResolvers<void>()
   const setupGate = Promise.withResolvers<void>()
-  const mergeGate = Promise.withResolvers<void>()
+  const pullGate = Promise.withResolvers<void>()
   const commitGate = Promise.withResolvers<void>()
   let statusCount = 0
-  let mergeCount = 0
+  let pullCount = 0
   let commitInvocations = 0
   let indexApplyCount = 0
-  const mergeOutcomes = [...(options.mergeOutcomes ?? [])]
+  const pullOutcomes = [...(options.pullOutcomes ?? [])]
   const pushOutcomes = [...(options.pushOutcomes ?? [])]
   const initialSecrets: Record<string, string> = {}
   if (auth !== null) {
@@ -195,22 +218,30 @@ function fakeServices(options: FakeOptions = {}) {
   git.onCommitAll(async (fallbackMessage, generation) => {
     record('commitAll', { fallbackMessage, generation })
     commitInvocations += 1
-    if (options.gateSecondCommit === true && commitInvocations === 2) {
+    if (options.gateCommit === true && commitInvocations === 1) {
       await commitGate.promise
     }
-    return CLEAN_COMMIT
+    const outcome = options.commitOutcome ?? COMMITTED
+    if (outcome.committed) {
+      calls.push('committed')
+    }
+    return outcome
   })
   git.onFetch((credential, generation) => {
     record('fetch', { credential, generation })
     return { ahead: 0, behind: 0 }
   })
-  git.onMergeRemote(async (generation) => {
-    record('mergeRemote', { generation })
-    mergeCount += 1
-    if (options.gateMerge === true && mergeCount === 1) {
-      await mergeGate.promise
+  git.onPull(async (_fallbackMessage, generation) => {
+    record('pull', { generation })
+    pullCount += 1
+    if (options.gatePull === true && pullCount === 1) {
+      await pullGate.promise
     }
-    return mergeOutcomes.shift() ?? options.mergeOutcome ?? UP_TO_DATE
+    const outcome = pullOutcomes.shift() ?? options.pullOutcome ?? PULLED
+    if (outcome.committed) {
+      calls.push('committed')
+    }
+    return outcome
   })
   git.onPush((credential, generation) => {
     record('push', { credential, generation })
@@ -249,6 +280,7 @@ function fakeServices(options: FakeOptions = {}) {
     },
   )
 
+  const progress = createTestProgressPort()
   backupDeps = {
     git,
     syncEngines: createSyncEngineFactory({ git, clock }),
@@ -256,21 +288,25 @@ function fakeServices(options: FakeOptions = {}) {
     githubRepos: createGithubRepoService({ http }),
     fileChanges,
     indexLifecycle,
-    progress: createTestProgressPort(),
+    progress,
+    clock,
     activity,
     platform: createTestPlatformService({ surface: { mobileApp: options.mobile ?? false } }),
     persistenceFlush,
     logger,
+    icloudNative,
   }
   return {
+    git,
     calls,
     invocations,
+    progress,
     secrets: secretStore,
     status,
     releaseStatus: () => statusGate.resolve(),
     releaseSetup: () => setupGate.resolve(),
     releaseIndexApply: () => indexApplyGate.resolve(),
-    releaseMerge: () => mergeGate.resolve(),
+    releasePull: () => pullGate.resolve(),
     releaseCommit: () => commitGate.resolve(),
   }
 }
@@ -278,8 +314,12 @@ function fakeServices(options: FakeOptions = {}) {
 /**
  * A backup service of the last {@link fakeServices} call, at graph generation 3.
  */
-function createBackup(options: { indexGeneration: number | null }): BackupService {
+function createBackup(options: {
+  indexGeneration: number | null
+  root?: string | undefined
+}): BackupService {
   return createBackupService(backupDeps, {
+    root: options.root ?? '/graph',
     generation: GENERATION,
     indexGeneration: options.indexGeneration,
   })
@@ -300,8 +340,11 @@ async function advance(ms: number): Promise<void> {
   await flush()
 }
 
+/**
+ * Commits made: `commitAll` and `pull` outcomes that report `committed: true`.
+ */
 function commitCount(calls: string[]): number {
-  return calls.filter((command) => command === 'commitAll').length
+  return calls.filter((command) => command === 'committed').length
 }
 
 function trackStates(backup: BackupService): BackupState[] {
@@ -312,7 +355,186 @@ function trackStates(backup: BackupService): BackupState[] {
   return states
 }
 
+const ICLOUD_ROOT = '/Users/a/Library/Mobile Documents/iCloud~app/Documents/Notes'
+
 describe('createBackupService', () => {
+  it('an iCloud graph with a remote waits for quiet before fetching', async () => {
+    const { calls } = fakeServices()
+    const backup = createBackup({ indexGeneration: 1, root: ICLOUD_ROOT })
+    await backup.start()
+    await vi.waitFor(() => {
+      expect(backup.getState()).toMatchObject({
+        phase: 'connected',
+        status: { state: 'waiting', until: 5 * 60_000 },
+      })
+    })
+    expect(calls).toContain('commitAll')
+    expect(calls).not.toContain('fetch')
+
+    await advance(5 * 60_000)
+    await vi.waitFor(() => {
+      expect(calls).toContain('fetch')
+    })
+    expect(icloudNative.calls()).toEqual([{ method: 'pendingCount', args: [ICLOUD_ROOT, 'notes'] }])
+    backup.dispose()
+  })
+
+  it('an unchanged state does not notify listeners', async () => {
+    fakeServices()
+    const backup = createBackup({ indexGeneration: 1 })
+    await backup.start()
+    await vi.waitFor(() => {
+      expect(backup.getState()).toMatchObject({ status: { state: 'idle' } })
+    })
+    const states = trackStates(backup)
+    await backup.backUpNow()
+    await flush()
+    expect(states.length).toBeGreaterThan(0)
+    for (let i = 1; i < states.length; i++) {
+      expect(states[i]).not.toEqual(states[i - 1])
+    }
+    expect(states.at(-1)).toMatchObject({ status: { state: 'idle' } })
+    backup.dispose()
+  })
+
+  it('a folder graph never enters quiet mode', async () => {
+    const { calls } = fakeServices()
+    const backup = createBackup({ indexGeneration: 1 })
+    await backup.start()
+    await vi.waitFor(() => {
+      expect(calls).toContain('fetch')
+    })
+    expect(backup.getState()).toMatchObject({ status: { state: 'idle' } })
+    expect(icloudNative.calls()).toEqual([])
+    backup.dispose()
+  })
+
+  describe('remote probe', () => {
+    const MOVED = { remoteOid: 'b', trackingOid: 'a' }
+
+    async function startSettled(options: Parameters<typeof fakeServices>[0], root?: string) {
+      const services = fakeServices(options)
+      const backup = createBackup({ indexGeneration: 1, root })
+      await backup.start()
+      await vi.waitFor(() => {
+        expect(backup.getState()).toMatchObject({
+          status: { state: expect.stringMatching(/idle|waiting/) },
+        })
+      })
+      return { ...services, backup }
+    }
+
+    it('probes the remote while visible and pulls when it moved', async () => {
+      const { git, calls, backup } = await startSettled({})
+      try {
+        const probes: Array<unknown> = []
+        let tip: { remoteOid: string | null; trackingOid: string | null } = {
+          remoteOid: 'a',
+          trackingOid: 'a',
+        }
+        git.onRemoteHead((credential, generation) => {
+          probes.push([credential, generation])
+          return tip
+        })
+        const fetches = calls.filter((command) => command === 'fetch').length
+
+        await advance(90_000)
+        expect(probes).toHaveLength(1)
+        expect(probes[0]).toEqual([{ username: 'x-access-token', secret: 'ghp_abc' }, GENERATION])
+        expect(calls.filter((command) => command === 'fetch')).toHaveLength(fetches)
+
+        tip = { remoteOid: null, trackingOid: 'a' } // the remote branch is gone
+        await advance(90_000)
+        expect(calls.filter((command) => command === 'fetch')).toHaveLength(fetches)
+
+        tip = MOVED
+        await advance(90_000)
+        expect(probes).toHaveLength(3)
+        await vi.waitFor(() => {
+          expect(calls.filter((command) => command === 'fetch')).toHaveLength(fetches + 1)
+        })
+      } finally {
+        backup.dispose()
+      }
+    })
+
+    it('does not probe iCloud-hosted graphs, mobile, hidden windows, or while in error', async () => {
+      let probes = 0
+      const probed = (): number => probes
+      const watch = (git: TestGitRepositoryService): void => {
+        git.onRemoteHead(() => {
+          probes += 1
+          return MOVED
+        })
+      }
+
+      const icloud = await startSettled({}, ICLOUD_ROOT)
+      watch(icloud.git)
+      await advance(5 * 60_000)
+      icloud.backup.dispose()
+      expect(probed()).toBe(0)
+
+      const mobile = await startSettled({ mobile: true })
+      watch(mobile.git)
+      await advance(5 * 60_000)
+      mobile.backup.dispose()
+      expect(probed()).toBe(0)
+
+      const hidden = await startSettled({})
+      watch(hidden.git)
+      activity.setHidden(true)
+      await advance(5 * 60_000)
+      expect(probed()).toBe(0)
+      activity.setHidden(false)
+      await advance(90_000)
+      expect(probed()).toBe(1)
+      hidden.backup.dispose()
+
+      const failing = await startSettled({})
+      watch(failing.git)
+      failing.git.onPush(() => {
+        throw new ReflectError('auth', 'bad token')
+      })
+      failing.git.onPull(() => ({ ...PULLED, committed: true, ahead: 1 }))
+      void failing.backup.backUpNow()
+      await vi.waitFor(() => {
+        expect(failing.backup.getState()).toMatchObject({ status: { state: 'error' } })
+      })
+      const before = probed()
+      await advance(5 * 60_000)
+      expect(probed()).toBe(before)
+      failing.backup.dispose()
+    })
+  })
+
+  it('a mobile cycle hidden after its commit pushes', async () => {
+    const { git, calls } = fakeServices({
+      mobile: true,
+      pullOutcome: { ...PULLED, committed: false },
+    })
+    const backup = createBackup({ indexGeneration: 1 })
+    try {
+      await backup.start()
+      await vi.waitFor(() => {
+        expect(backup.getState()).toMatchObject({ status: { state: 'idle' } })
+      })
+      git.onCommitAll(() => {
+        activity.setHidden(true)
+        return { committed: true, sha: 'c', ahead: 1, skippedLargeFiles: [] }
+      })
+      fileChanges.emit({
+        changes: [{ path: 'notes/edited.md', kind: 'upsert', modifiedMs: 1 }],
+        source: 'external',
+      })
+      await advance(10_000)
+      await vi.waitFor(() => {
+        expect(calls.filter((command) => command === 'push')).toHaveLength(1)
+      })
+    } finally {
+      backup.dispose()
+    }
+  })
+
   it('reports disconnected when no credential is stored — but keeps local history', async () => {
     // Signing out of GitHub (or a lapsed credential) stops the *backup*, not
     // the note history: the graph already has a repo, so the commit-only loop
@@ -466,12 +688,12 @@ describe('createBackupService', () => {
   })
 
   it('runs the launch pull when fully connected — and skips the idle push', async () => {
-    const { calls } = fakeServices()
+    const { calls } = fakeServices({ pullOutcome: { ...PULLED, committed: false } })
     const backup = createBackup({ indexGeneration: 1 })
     const states = trackStates(backup)
     await backup.start()
     await vi.waitFor(() => {
-      expect(calls).toContain('mergeRemote')
+      expect(calls).toContain('pull')
     })
 
     expect(states.at(-1)).toMatchObject({ phase: 'connected', status: { state: 'idle' } })
@@ -557,6 +779,40 @@ describe('createBackupService', () => {
     expect(commitCount(calls)).toBe(2)
     expect(calls).not.toContain('fetch')
     expect(calls).not.toContain('push')
+    backup.dispose()
+  })
+
+  it('a pull batch does not tick the commit debounce', async () => {
+    const { calls } = fakeServices({ auth: null, remoteUrl: null })
+    const backup = createBackup({ indexGeneration: 1 })
+    await backup.start()
+    await vi.waitFor(() => {
+      expect(commitCount(calls)).toBe(1)
+    })
+
+    fileChanges.emit({
+      changes: [{ path: 'notes/edited.md', kind: 'upsert', modifiedMs: 1 }],
+      source: 'pull',
+    })
+    await advance(30_000)
+    expect(commitCount(calls)).toBe(1)
+    backup.dispose()
+  })
+
+  it('an icloud-sweep batch ticks the commit debounce', async () => {
+    const { calls } = fakeServices({ auth: null, remoteUrl: null })
+    const backup = createBackup({ indexGeneration: 1 })
+    await backup.start()
+    await vi.waitFor(() => {
+      expect(commitCount(calls)).toBe(1)
+    })
+
+    fileChanges.emit({
+      changes: [{ path: 'notes/edited.md', kind: 'upsert', modifiedMs: 1 }],
+      source: 'icloud-sweep',
+    })
+    await advance(30_000)
+    expect(commitCount(calls)).toBe(2)
     backup.dispose()
   })
 
@@ -692,10 +948,10 @@ describe('createBackupService', () => {
   // 403 for a token without access to the repo and for rate limiting; the
   // backup asks GitHub whether the token is good before blaming it.
   const FORBIDDEN = { kind: 'auth', message: 'request failed with status code: 403' }
-  const MERGED: MergeOutcome = { kind: 'merged', conflictedPaths: [], changedFiles: [] }
+  const MERGED: PullOutcome = { ...PULLED, ahead: 1 }
 
   it('a 403 with a valid token reports a refused sync, not a bad credential', async () => {
-    fakeServices({ mergeOutcome: MERGED, pushError: FORBIDDEN })
+    fakeServices({ pullOutcome: MERGED, pushError: FORBIDDEN })
     http.on('GET', USER_URL, jsonResponse({ login: 'alex' }))
     const backup = createBackup({ indexGeneration: 1 })
     await backup.start()
@@ -713,7 +969,7 @@ describe('createBackupService', () => {
   })
 
   it('a 403 with a rejected token stays an auth error', async () => {
-    fakeServices({ mergeOutcome: MERGED, pushError: FORBIDDEN })
+    fakeServices({ pullOutcome: MERGED, pushError: FORBIDDEN })
     http.on('GET', USER_URL, jsonResponse({ message: 'Bad credentials' }, 401))
     const backup = createBackup({ indexGeneration: 1 })
     await backup.start()
@@ -730,7 +986,7 @@ describe('createBackupService', () => {
   })
 
   it('a 403 with a token probe that never reaches GitHub reports offline', async () => {
-    fakeServices({ mergeOutcome: MERGED, pushError: FORBIDDEN })
+    fakeServices({ pullOutcome: MERGED, pushError: FORBIDDEN })
     http.on('GET', USER_URL, () => {
       throw new TypeError('Failed to fetch')
     })
@@ -746,7 +1002,7 @@ describe('createBackupService', () => {
   })
 
   it('a 403 with a rate-limited token probe reports offline, not a bad credential', async () => {
-    fakeServices({ mergeOutcome: MERGED, pushError: FORBIDDEN })
+    fakeServices({ pullOutcome: MERGED, pushError: FORBIDDEN })
     http.on('GET', USER_URL, jsonResponse({ message: 'API rate limit exceeded' }, 403))
     const backup = createBackup({ indexGeneration: 1 })
     await backup.start()
@@ -763,39 +1019,35 @@ describe('createBackupService', () => {
   // queues behind an in-flight cycle, so it can never land between a pull's
   // ref move and its checkout and commit the stale tree (#1405).
   it('quit flush waits for an in-flight pull before committing', async () => {
-    const { calls, releaseMerge, releaseCommit } = fakeServices({
-      gateMerge: true,
-      gateSecondCommit: true,
+    const { calls, releasePull, releaseCommit } = fakeServices({
+      gatePull: true,
+      gateCommit: true,
     })
     const backup = createBackup({ indexGeneration: 1 })
     await backup.start()
     try {
       await vi.waitFor(() => {
-        expect(calls).toContain('mergeRemote')
+        expect(calls).toContain('pull')
       })
-      expect(commitCount(calls)).toBe(1) // the launch cycle's own commit
 
       let flushResolved = false
       const flushed = persistenceFlush.flushAll().then(() => {
         flushResolved = true
       })
       await Promise.resolve()
-      // The pull is still between fetch and merge: no second commit may run yet.
-      expect(commitCount(calls)).toBe(1)
+      // The pull is still between fetch and merge: no commit may run yet.
+      expect(calls).not.toContain('commitAll')
 
-      releaseMerge()
+      releasePull()
       await vi.waitFor(() => {
-        expect(commitCount(calls)).toBe(2)
+        expect(calls).toContain('commitAll')
       })
       // The flush resolves with its commit, not before it.
       expect(flushResolved).toBe(false)
       releaseCommit()
       await flushed
     } finally {
-      // The expected failure above throws past the lines after it, so the
-      // gate and the backup are released here, or the suspended merge
-      // and the live listeners leak into the next test.
-      releaseMerge()
+      releasePull()
       releaseCommit()
       backup.dispose()
     }
@@ -807,7 +1059,7 @@ describe('createBackupService', () => {
     try {
       await backup.start()
       await vi.waitFor(() => {
-        expect(calls).toContain('mergeRemote') // the launch cycle ran
+        expect(calls).toContain('pull') // the launch cycle ran
       })
       const before = commitCount(calls)
 
@@ -857,12 +1109,12 @@ describe('createBackupService', () => {
     const backup = createBackup({ indexGeneration: 1 })
     await backup.start()
     await vi.waitFor(() => {
-      expect(calls.filter((command) => command === 'commitAll')).toHaveLength(1)
+      expect(commitCount(calls)).toBe(1)
     })
 
     activity.emitHidden()
     await flush()
-    expect(calls.filter((command) => command === 'commitAll')).toHaveLength(1)
+    expect(commitCount(calls)).toBe(1)
 
     backup.dispose()
   })
@@ -883,7 +1135,7 @@ describe('createBackupService', () => {
       activity.emitVisible()
       activity.emitResume()
       await vi.waitFor(() => {
-        expect(calls.filter((command) => command === 'commitAll')).toHaveLength(1)
+        expect(commitCount(calls)).toBe(1)
         expect(calls.filter((command) => command === 'fetch')).toHaveLength(1)
       })
 
@@ -897,13 +1149,13 @@ describe('createBackupService', () => {
 
       // Both the immediate online trigger and the edit's 10s mobile debounce
       // are dropped while hidden.
-      expect(calls.filter((command) => command === 'commitAll')).toHaveLength(1)
+      expect(commitCount(calls)).toBe(1)
       expect(calls.filter((command) => command === 'fetch')).toHaveLength(1)
 
       activity.emitVisible()
       activity.emitResume()
       await flush()
-      expect(calls.filter((command) => command === 'commitAll')).toHaveLength(2)
+      expect(commitCount(calls)).toBe(2)
       // Foreground replay is full, so it fetches rather than merely pushing
       // the edit that arrived while hidden.
       expect(calls.filter((command) => command === 'fetch')).toHaveLength(2)
@@ -942,12 +1194,14 @@ describe('createBackupService', () => {
 
   it('fans a pull’s writes whole to the local file-changes channel — consumers filter by path', async () => {
     fakeServices({
-      mergeOutcome: {
-        kind: 'merged',
-        conflictedPaths: [],
+      pullOutcome: {
+        committed: false,
+        ahead: 1,
+        skippedLargeFiles: [],
+        reviewPaths: [],
         changedFiles: [
           { path: 'notes/from-b.md', kind: 'upsert', modifiedMs: 123 },
-          { path: 'daily/2026-06-11.md', kind: 'remove' },
+          { path: 'daily/2026-06-11.md', kind: 'remove', modifiedMs: null },
           // Not a note — but a pulled recording must still reach the
           // audio-memo reconciler, which subscribes to this same channel.
           {
@@ -977,22 +1231,51 @@ describe('createBackupService', () => {
     unlisten()
   })
 
+  it('a hint lists every copy by its graph path', async () => {
+    const { progress } = fakeServices({
+      pullOutcome: {
+        committed: false,
+        ahead: 0,
+        skippedLargeFiles: [],
+        reviewPaths: [
+          'notes/a (conflict 2026-10-16 08-05-31 a1b2c3d4).png',
+          'notes/b (conflict 2026-10-16 08-05-31 e5f6a7b8).md',
+        ],
+        changedFiles: [],
+      },
+    })
+    const backup = createBackup({ indexGeneration: 1 })
+    await backup.start()
+
+    await vi.waitFor(() => {
+      expect(progress.snapshot()).toEqual([
+        expect.objectContaining({
+          label: 'Syncing',
+          status: 'failed',
+          message:
+            'Kept 2 conflict copies: notes/a (conflict 2026-10-16 08-05-31 a1b2c3d4).png, notes/b (conflict 2026-10-16 08-05-31 e5f6a7b8).md',
+        }),
+      ])
+    })
+    backup.dispose()
+  })
+
   it('fans retry-merge batches immediately while serializing direct indexing', async () => {
-    const firstChange: FileChange = {
+    const firstChange: ChangedFile = {
       path: 'notes/from-remote-1.md',
       kind: 'upsert',
       modifiedMs: 123,
     }
-    const secondChange: FileChange = {
+    const secondChange: ChangedFile = {
       path: 'notes/from-remote-2.md',
       kind: 'upsert',
       modifiedMs: 456,
     }
     const { calls, releaseIndexApply } = fakeServices({
       gateIndexApply: true,
-      mergeOutcomes: [
-        { kind: 'merged', conflictedPaths: [], changedFiles: [firstChange] },
-        { kind: 'merged', conflictedPaths: [], changedFiles: [secondChange] },
+      pullOutcomes: [
+        { ...PULLED, ahead: 1, changedFiles: [firstChange] },
+        { ...PULLED, ahead: 1, changedFiles: [secondChange] },
       ],
       pushOutcomes: [
         { pushed: false, nonFastForward: true, rejectionMessage: 'fetch first' },
@@ -1036,15 +1319,17 @@ describe('createBackupService', () => {
   it('does not start queued direct indexing after backup teardown', async () => {
     const { calls, releaseIndexApply } = fakeServices({
       gateIndexApply: true,
-      mergeOutcomes: [
+      pullOutcomes: [
         {
-          kind: 'merged',
-          conflictedPaths: [],
+          ...PULLED,
+          committed: false,
+          ahead: 1,
           changedFiles: [{ path: 'notes/from-remote-1.md', kind: 'upsert', modifiedMs: 123 }],
         },
         {
-          kind: 'merged',
-          conflictedPaths: [],
+          ...PULLED,
+          committed: false,
+          ahead: 1,
           changedFiles: [{ path: 'notes/from-remote-2.md', kind: 'upsert', modifiedMs: 456 }],
         },
       ],
@@ -1074,9 +1359,10 @@ describe('createBackupService', () => {
   it('keeps launch sync active until pulled notes finish direct indexing', async () => {
     const { calls, releaseIndexApply } = fakeServices({
       gateIndexApply: true,
-      mergeOutcome: {
-        kind: 'fastForward',
-        conflictedPaths: [],
+      pullOutcome: {
+        ...PULLED,
+        committed: false,
+        ahead: 0,
         changedFiles: [{ path: 'notes/from-remote.md', kind: 'upsert', modifiedMs: 123 }],
       },
     })
@@ -1104,9 +1390,10 @@ describe('createBackupService', () => {
   it('still settles to idle when direct indexing fails — projection health never blocks backup', async () => {
     const { calls } = fakeServices({
       failIndexApply: true,
-      mergeOutcome: {
-        kind: 'fastForward',
-        conflictedPaths: [],
+      pullOutcome: {
+        ...PULLED,
+        committed: false,
+        ahead: 0,
         changedFiles: [{ path: 'notes/from-remote.md', kind: 'upsert', modifiedMs: 123 }],
       },
     })
@@ -1131,9 +1418,10 @@ describe('createBackupService', () => {
   it('defers a pulled note direct-index apply while the mobile app is hidden', async () => {
     const { calls } = fakeServices({
       mobile: true,
-      mergeOutcome: {
-        kind: 'merged',
-        conflictedPaths: [],
+      pullOutcome: {
+        ...PULLED,
+        committed: false,
+        ahead: 1,
         changedFiles: [{ path: 'notes/from-remote.md', kind: 'upsert', modifiedMs: 123 }],
       },
     })
@@ -1147,12 +1435,13 @@ describe('createBackupService', () => {
   })
 
   it('skips the direct-index apply when the mobile app went hidden mid-pull', async () => {
-    const { calls, releaseMerge } = fakeServices({
+    const { calls, releasePull } = fakeServices({
       mobile: true,
-      gateMerge: true,
-      mergeOutcome: {
-        kind: 'merged',
-        conflictedPaths: [],
+      gatePull: true,
+      pullOutcome: {
+        ...PULLED,
+        committed: false,
+        ahead: 1,
         changedFiles: [{ path: 'notes/from-remote.md', kind: 'upsert', modifiedMs: 123 }],
       },
     })
@@ -1163,11 +1452,11 @@ describe('createBackupService', () => {
     const backup = createBackup({ indexGeneration: 1 })
     await backup.start()
     await vi.waitFor(() => {
-      expect(calls).toContain('mergeRemote')
+      expect(calls).toContain('pull')
     })
 
     activity.setHidden(true)
-    releaseMerge()
+    releasePull()
     await vi.waitFor(() => {
       expect(batches).toHaveLength(1) // the landed merge still fans out
     })

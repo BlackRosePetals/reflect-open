@@ -204,6 +204,7 @@ describe('reloadAll with live sessions', () => {
     noteFile: TestNoteFileService,
     applied: string[],
     snapshots: NoteSessionSnapshot[],
+    options?: { readOnly?: boolean },
   ): NoteSession {
     return createNoteSessionService({
       noteFile,
@@ -212,9 +213,9 @@ describe('reloadAll with live sessions', () => {
       graphSession: createTestGraphSessionService({ graph: { generation: 1 } }),
     }).create({
       path: PATH,
-      // Read-only: the session tracks dirtiness but never writes, so a
-      // dirty buffer can't race a debounced save into the assertions.
-      readOnly: true,
+      // Read-only by default: the session tracks dirtiness but never writes,
+      // so a dirty buffer can't race a debounced save into the assertions.
+      readOnly: options?.readOnly ?? true,
       classify: () => 'exact',
       onSnapshot: (snapshot) => {
         snapshots.push(snapshot)
@@ -239,17 +240,18 @@ describe('reloadAll with live sessions', () => {
       openDocuments.reloadAll()
 
       await vi.waitFor(() => expect(applied).toContain('# New from the Mac\n'))
-      expect(snapshots.at(-1)?.conflict).toBeNull()
+      expect(snapshots.at(-1)?.dirty).toBe(false)
     } finally {
       unregister()
       session.dispose()
     }
   })
 
-  it('a dirty open note parks the conflict banner instead of losing edits', async () => {
+  it('a dirty open note saves at once and adopts what the write merged', async () => {
     const noteFile = createTestNoteFileService({ files: { [PATH]: '# Old\n' } })
+    const applied: string[] = []
     const snapshots: NoteSessionSnapshot[] = []
-    const session = liveSession(noteFile, [], snapshots)
+    const session = liveSession(noteFile, applied, snapshots, { readOnly: false })
     const unregister = openDocuments.register({ session })
     try {
       session.load()
@@ -257,13 +259,15 @@ describe('reloadAll with live sessions', () => {
       session.editorChanged('# Old\nmy unsaved line\n')
 
       noteFile.set(PATH, '# New from the Mac\n')
+      noteFile.mergeNextWrite(PATH, '# New from the Mac\nmy unsaved line\n')
       openDocuments.reloadAll()
 
-      await vi.waitFor(() => expect(snapshots.at(-1)?.conflict).toBe('# New from the Mac\n'))
-      expect(snapshots.at(-1)?.dirty).toBe(true)
+      await vi.waitFor(() => expect(snapshots.at(-1)?.dirty).toBe(false))
+      expect(noteFile.files().get(PATH)).toBe('# New from the Mac\nmy unsaved line\n')
+      expect(applied.at(-1)).toBe('# New from the Mac\nmy unsaved line\n')
     } finally {
       unregister()
-      session.discard() // never flush the deliberately-dirty buffer
+      session.dispose()
     }
   })
 

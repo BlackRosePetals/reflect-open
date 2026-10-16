@@ -1,6 +1,6 @@
 //! The shadow base store: `.reflect/sync-base/<note-path>` holds each note's
 //! content at its **last synced state** — the common-ancestor approximation
-//! that turns two-way conflicts into three-way merges (Plan 21).
+//! that turns two-way conflicts into three-way merges.
 //!
 //! The advance rule is what makes it an ancestor and not just a copy: the
 //! base moves **only** when
@@ -21,7 +21,7 @@
 //! merge-loop breaker. When devices with different bases auto-merge the same
 //! pair to different results, iCloud re-conflicts them; seeing a pair you
 //! already merged once means base-dependent merging cannot converge, and the
-//! ladder falls to base-independent deterministic markers instead.
+//! ladder keeps the newer side instead.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -39,6 +39,14 @@ pub fn content_hash(content: &str) -> AppResult<String> {
     git2::Oid::hash_object(git2::ObjectType::Blob, content.as_bytes())
         .map(|oid| oid.to_string())
         .map_err(|err| AppError::io(format!("content hash failed: {err}")))
+}
+
+/// The first 8 hex digits of the file's blob hash, read as a stream so a large
+/// attachment never sits in memory.
+pub fn blob_hash8_of_file(path: &Path) -> AppResult<String> {
+    let oid = git2::Oid::hash_file(git2::ObjectType::Blob, path)
+        .map_err(|err| AppError::io(format!("file hash failed for {}: {err}", path.display())))?;
+    Ok(oid.to_string()[..8].to_string())
 }
 
 /// The per-graph shadow base store.

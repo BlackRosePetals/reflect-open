@@ -301,7 +301,7 @@ pub struct NoteMoveRequest {
     from_address: write::MovedNoteAddress,
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn note_move_indexed<R: tauri::Runtime>(
     request: NoteMoveRequest,
     generation: u64,
@@ -312,8 +312,14 @@ pub fn note_move_indexed<R: tauri::Runtime>(
 ) -> AppResult<()> {
     let _background_task = background_task::scoped(&background_tasks, "Reflect note move");
     let root = crate::fs::root_for_generation(&graph, generation)?;
-    {
+    crate::fs::with_graph_lock(&root, || {
+        crate::fs::root_for_generation(&graph, generation)?;
         let mut state = lock_state(&index)?;
+        if state.root.as_deref() != Some(root.as_path()) {
+            return Err(AppError::io(
+                "the index is open for another graph; dropping the move",
+            ));
+        }
         let conn = state.conn.as_mut().ok_or_else(AppError::no_graph)?;
         move_rows(conn, &request.from, &request.to, &request.to_address)?;
         if let Err(err) = crate::fs::move_note_file(&root, &request.from, &request.to) {
@@ -328,7 +334,8 @@ pub fn note_move_indexed<R: tauri::Runtime>(
             }
             return Err(err);
         }
-    }
+        Ok(())
+    })?;
     crate::fs::invalidate_file_catalog(&graph, &root);
     emit_index_written(&app);
     emit_note_moved(&app, &request.from, &request.to);

@@ -6,7 +6,12 @@ import {
   type NoteCreationService,
   type ResolveOrCreateNoteResult,
 } from '../graph/note-creation-service.ts'
-import type { LocalNoteRead, NoteFileService, VaultScanStats } from '../graph/note-file-service.ts'
+import type {
+  LocalNoteRead,
+  NoteFileService,
+  NoteWriteResult,
+  VaultScanStats,
+} from '../graph/note-file-service.ts'
 import {
   createNoteLinkResolverService,
   type ExistingWikiTargetResolution,
@@ -77,6 +82,12 @@ export interface TestNoteFileService extends NoteFileService {
    */
   evict(path: string): void
   /**
+   * Make the next `write` of `path` merge: `content` becomes the file and is
+   * returned as `merged`. Without it, a checked write against a file that
+   * holds neither `expectedContents` nor the new contents rejects.
+   */
+  mergeNextWrite(path: string, content: string): void
+  /**
    * The current files by graph-relative path.
    */
   files(): ReadonlyMap<string, string>
@@ -104,6 +115,7 @@ class TestNoteFileServiceImpl implements TestNoteFileService {
   readonly #writeLog: NoteFileWrite[] = []
   readonly #readLog: NoteFileRead[] = []
   readonly #trashLog: string[] = []
+  readonly #merges = new Map<string, string>()
   readonly #generation: number | undefined
   #tick = 0
 
@@ -132,15 +144,25 @@ class TestNoteFileServiceImpl implements TestNoteFileService {
     contents: string,
     pinned: number,
     expectedContents?: string | null,
-  ): Promise<number> {
+  ): Promise<NoteWriteResult> {
     checkGeneration(this.#generation, pinned)
+    const merged = this.#merges.get(path)
+    if (merged !== undefined) {
+      this.#merges.delete(path)
+      this.#store(path, merged, pinned)
+      return { merged }
+    }
     if (expectedContents !== undefined) {
       const current = this.#files.get(path)?.contents ?? null
-      if (current !== expectedContents) {
+      if (current !== expectedContents && current !== contents) {
         throw new ReflectError('io', 'Note changed on disk; reload before retrying')
       }
+      if (current === contents) {
+        return { merged: null }
+      }
     }
-    return this.#store(path, contents, pinned)
+    this.#store(path, contents, pinned)
+    return { merged: null }
   }
 
   async create(path: string, contents: string, pinned: number): Promise<NoteCreateOutcome> {
@@ -194,6 +216,10 @@ class TestNoteFileServiceImpl implements TestNoteFileService {
 
   evict(path: string): void {
     this.#evicted.add(path)
+  }
+
+  mergeNextWrite(path: string, content: string): void {
+    this.#merges.set(path, content)
   }
 
   files(): ReadonlyMap<string, string> {
@@ -280,7 +306,7 @@ class NoteFileOverrideService implements NoteFileService {
     contents: string,
     generation: number,
     expectedContents?: string | null,
-  ): Promise<number> {
+  ): Promise<NoteWriteResult> {
     return (this.#overrides.write ?? this.#inner.write.bind(this.#inner))(
       path,
       contents,

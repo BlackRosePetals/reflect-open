@@ -18,7 +18,12 @@ export interface DevBridgeBackend {
 
 const dbQueryArgsSchema = z.object({ sql: z.string(), params: z.array(z.unknown()) })
 const pathArgsSchema = z.object({ path: z.string() })
-const writeArgsSchema = z.object({ path: z.string(), contents: z.string() })
+const writeArgsSchema = z.object({
+  path: z.string(),
+  contents: z.string(),
+  checkContents: z.boolean().optional(),
+  expectedContents: z.string().nullable().optional(),
+})
 const createArgsSchema = writeArgsSchema.extend({ generation: z.number().int().nonnegative() })
 const moveArgsSchema = z.object({ from: z.string(), to: z.string() })
 const moveRequestArgsSchema = z.object({
@@ -172,8 +177,14 @@ class DevBridgeImpl implements IpcBridge {
         return { kind: 'content', content: contents }
       }
       case 'note_write': {
-        const { path, contents } = writeArgsSchema.parse(args)
-        return files.write(path, contents)
+        const { path, contents, checkContents, expectedContents } = writeArgsSchema.parse(args)
+        if (checkContents === true) {
+          const current = files.read(path)
+          if (current !== (expectedContents ?? null) && current !== contents) {
+            throw new ReflectError('io', 'Note changed on disk; reload before retrying')
+          }
+        }
+        return { modifiedMs: files.write(path, contents), merged: null }
       }
       case 'note_create': {
         const { path, contents, generation } = createArgsSchema.parse(args)
@@ -301,7 +312,6 @@ class DevBridgeImpl implements IpcBridge {
           remoteUrl: null,
           ahead: 0,
           behind: 0,
-          inProgress: false,
         }
 
       case 'calendar_authorization_status':

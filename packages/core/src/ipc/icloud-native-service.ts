@@ -37,15 +37,14 @@ const icloudSweepChangeSchema = z.object({
 
 const icloudSweepOutcomeSchema = z.object({
   changed: z.array(icloudSweepChangeSchema),
-  needsReview: z.array(z.string()),
-  deferred: z.array(z.string()),
+  copies: z.array(z.string()),
   autoResolved: z.number().int().nonnegative(),
 })
 
 /**
  * What one iCloud conflict sweep did (Plan 21): the files it rewrote or
- * removed (reindex these directly), the paths now carrying markers, the
- * paths deferred for dirty sessions, and how many conflicts auto-resolved.
+ * removed (reindex these directly), the graph-relative paths of the conflict
+ * copies it wrote, and how many conflicts auto-resolved.
  */
 export type IcloudSweepOutcome = z.infer<typeof icloudSweepOutcomeSchema>
 
@@ -71,21 +70,21 @@ export interface IcloudScanOptions {
   /**
    * Notes with dirty open sessions; their conflicts defer to the next scan.
    */
-  skipPaths?: string[]
+  skipPaths?: string[] | undefined
   /**
    * External changes just applied cleanly — their content becomes the new
    * shadow merge base. Never pass this device's own writes.
    */
-  ingestedPaths?: string[]
+  ingestedPaths?: string[] | undefined
   /**
    * Record a fill-only baseline (adoption): notes without a base snapshot
    * their current content. Safe to repeat — existing bases never move here.
    */
-  recordBaseline?: boolean
+  recordBaseline?: boolean | undefined
   /**
    * Version-check coverage; defaults to `'full'` (the safe backstop).
    */
-  scope?: IcloudSweepScope
+  scope?: IcloudSweepScope | undefined
 }
 
 /**

@@ -1,6 +1,7 @@
 import { useRef, useState, type ReactElement } from 'react'
 import type { GraphInfo } from '@reflect/core'
 import { FolderOpen, GraduationCap, LocateFixed, PanelsTopLeft, Settings } from 'lucide-react'
+import { CountdownText } from '@/components/countdown-text.tsx'
 import { GraphSwatch } from '@/components/graph-swatch.tsx'
 import { ReflectAppsDialog } from '@/components/reflect-apps-dialog.tsx'
 import { ShortcutKeys } from '@/components/shortcut-keys.tsx'
@@ -31,23 +32,31 @@ function graphSwitchBindingFor(index: number): string | null {
   return keybindingFor(`graph.switch${index + 1}`)
 }
 
-/**
- * The quiet backup indicator: nothing when backed up (or not set up), a
- * pulsing accent dot while backing up, amber when offline with queued
- * changes, red when backup needs attention. Detail lives in Settings.
- */
-function backupDot(backup: BackupState): { className: string; label: string } | null {
+/** The quiet backup indicator: a dot and a screen-reader label, nothing when idle. */
+function BackupDot({ backup }: { backup: BackupState }): ReactElement | null {
   if (backup.phase !== 'connected' || backup.status.state === 'idle') {
     return null
   }
-  switch (backup.status.state) {
-    case 'syncing':
-      return { className: 'bg-accent motion-safe:animate-pulse', label: 'Backing up' }
-    case 'offline':
-      return { className: 'bg-amber-500', label: 'Backup waiting for a connection' }
-    case 'error':
-      return { className: 'bg-red-500', label: 'Backup failed — see Settings' }
-  }
+  const status = backup.status
+  const { className, label } = {
+    syncing: { className: 'bg-accent motion-safe:animate-pulse', label: 'Backing up' },
+    waiting: { className: 'bg-text-muted', label: 'Backup scheduled' },
+    offline: { className: 'bg-amber-500', label: 'Backup waiting for a connection' },
+    error: { className: 'bg-red-500', label: 'Backup failed — see Settings' },
+  }[status.state]
+  return (
+    <>
+      <span aria-hidden className={cn('h-1.5 w-1.5 flex-none rounded-full', className)} />
+      <span role="status" className="sr-only">
+        {label}
+      </span>
+      {status.state === 'waiting' ? (
+        <span className="sr-only">
+          Backs up in <CountdownText until={status.until} />
+        </span>
+      ) : null}
+    </>
+  )
 }
 
 interface GraphFooterProps {
@@ -71,7 +80,6 @@ export function GraphFooter({ graph, context }: GraphFooterProps): ReactElement 
   const { colorFor } = useGraphColors()
   const { backup } = useSync()
   const { route } = useRouter()
-  const dot = backupDot(backup)
   const settingsActive = route.kind === 'settings'
 
   return (
@@ -96,17 +104,7 @@ export function GraphFooter({ graph, context }: GraphFooterProps): ReactElement 
                     <span className="min-w-0 truncate text-xs font-medium text-text-secondary transition-colors duration-100 group-hover:text-text">
                       {graph.name}
                     </span>
-                    {dot !== null ? (
-                      <>
-                        <span
-                          aria-hidden
-                          className={cn('h-1.5 w-1.5 flex-none rounded-full', dot.className)}
-                        />
-                        <span role="status" className="sr-only">
-                          {dot.label}
-                        </span>
-                      </>
-                    ) : null}
+                    <BackupDot backup={backup} />
                     {indexing ? (
                       <span role="status" className="sr-only">
                         Indexing

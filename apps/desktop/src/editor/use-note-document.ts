@@ -15,11 +15,10 @@ import { checkRoundTrip } from './roundtrip.ts'
  * React adapter over the `@reflect/core` document state machine
  * (`NoteSessionService`): one session per open path, wired to
  * the watcher event stream (through `OpenDocumentsService`) and the editor's
- * imperative handle. All
- * save/conflict/protection semantics live in core's `note-session-service.ts`, and the
- * create/adopt/teardown/hand-off lifecycle (a rename retargets the live
- * session and the route follows, Plan 17) lives in core's
- * `document-binding.ts` — this hook only adapts both to React.
+ * imperative handle. All save/merge/protection semantics live in core's
+ * `note-session-service.ts`, and the create/adopt/teardown/hand-off lifecycle
+ * (a rename retargets the live session and the route follows, Plan 17) lives
+ * in core's `document-binding.ts` — this hook only adapts both to React.
  */
 
 export interface NoteDocument extends NoteSessionSnapshot {
@@ -28,17 +27,9 @@ export interface NoteDocument extends NoteSessionSnapshot {
    */
   onEditorChange: (markdown: string) => void
   /**
-   * Wire to the editor's imperative handle (reload/conflict application).
+   * Wire to the editor's imperative handle (reload and merged-save application).
    */
   bindEditor: (handle: NoteEditorHandle | null) => void
-  /**
-   * Resolve a conflict by keeping the buffer (rewrites the file).
-   */
-  keepMine: () => void
-  /**
-   * Resolve a conflict by loading the external content (discards the buffer).
-   */
-  loadTheirs: () => void
   /**
    * Stable identity of the underlying session: increments when a session is
    * *created*, not when a rename retargets one (Plan 17). Key the editor on
@@ -54,14 +45,14 @@ export interface NoteDocumentOptions {
    * created by the first save — Plan 06's lazy daily-note contract: opening a
    * day never litters the graph; writing does.
    */
-  createIfMissing?: boolean
+  createIfMissing?: boolean | undefined
   /**
    * Maintain inbound `[[links]]` when this note's settled title changes. The
    * coordinator separately requires a direct `notes/*.md` path with valid
    * Reflect ULID frontmatter before moving a file onto its title's slug, so
    * adopted and stable-path notes keep their filenames.
    */
-  trackRenames?: boolean
+  trackRenames?: boolean | undefined
   /**
    * Markdown to seed a missing note's buffer with (the new-note title
    * template). Requires `createIfMissing`; see `NoteSessionOptions.missingSeed`
@@ -80,10 +71,6 @@ export function useNoteDocument(path: string | null, options?: NoteDocumentOptio
   const missingSeed = options?.missingSeed
   const [snapshot, setSnapshot] = useState<NoteSessionSnapshot>(INITIAL_NOTE_SNAPSHOT)
   const editorRef = useRef<NoteEditorHandle | null>(null)
-  /**
-   * Mirrors the snapshot's conflict for non-reactive checks (rename gating).
-   */
-  const conflictRef = useRef<string | null>(null)
   /**
    * The pane's lifecycle policy object — one per hook instance.
    */
@@ -104,22 +91,13 @@ export function useNoteDocument(path: string | null, options?: NoteDocumentOptio
     const { session, created } = binding.bind(path, {
       // The auto-rename lifecycle (Plan 07b/17) is owned by the coordinator —
       // the tracker, the rewrite chain, alias placement, and the file move.
-      coordinator: () =>
-        trackRenames
-          ? titleRename.createCoordinator({
-              path,
-              canFire: () => conflictRef.current === null,
-            })
-          : null,
+      coordinator: () => (trackRenames ? titleRename.createCoordinator({ path }) : null),
       session: (coordinator) =>
         noteSessions.create({
           path,
           readOnly: !canWrite,
           classify: checkRoundTrip,
-          onSnapshot: (next) => {
-            conflictRef.current = next.conflict
-            setSnapshot(next)
-          },
+          onSnapshot: setSnapshot,
           applyContent: (markdown) => editorRef.current?.setMarkdown(markdown),
           reconcilePendingEditorInput: () => {
             // Meowdown 0.43.1 synchronously emits onDocChange only when this
@@ -193,20 +171,10 @@ export function useNoteDocument(path: string | null, options?: NoteDocumentOptio
     editorRef.current = handle
   }, [])
 
-  const keepMine = useCallback(() => {
-    binding.session()?.keepMine()
-  }, [binding])
-
-  const loadTheirs = useCallback(() => {
-    binding.session()?.loadTheirs()
-  }, [binding])
-
   return {
     ...snapshot,
     onEditorChange,
     bindEditor,
-    keepMine,
-    loadTheirs,
     sessionEpoch: binding.epoch(),
   }
 }
