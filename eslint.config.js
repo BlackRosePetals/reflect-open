@@ -337,15 +337,12 @@ export default defineESLintConfig(
     },
     /// keep-sorted
     rules: {
-      '@eslint-react/dom-no-flush-sync': 'off',
       '@eslint-react/set-state-in-effect': 'off',
-      '@eslint-react/use-state': 'off',
       '@typescript-eslint/no-base-to-string': 'off',
       '@typescript-eslint/no-unused-vars': 'off',
       'no-var': 'off',
       'regexp/no-super-linear-backtracking': 'off',
       'unicorn/no-computed-property-existence-check': 'off',
-      'unicorn/no-unnecessary-splice': 'off',
     },
   },
   {
