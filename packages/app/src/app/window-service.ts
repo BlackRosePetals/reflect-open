@@ -45,18 +45,18 @@ export interface WindowHost {
    * True when the host can open secondary note windows.
    */
   readonly multiWindow: boolean
-  setTitle(title: string): Promise<void>
+  setTitle(title: string): MaybePromise<void>
   /**
    * The label of the focused webview window, or `null` when none has focus.
    */
-  focusedWindowLabel(): Promise<string | null>
-  emitTo(label: string, event: string, payload: unknown): Promise<void>
+  focusedWindowLabel(): MaybePromise<string | null>
+  emitTo(label: string, event: string, payload: unknown): MaybePromise<void>
   /**
    * Listen for events addressed to this window.
    */
-  listen(event: string, handler: (payload: unknown) => void): Promise<Unlisten>
-  onCloseRequested(handler: CloseRequestedHandler): Promise<Unlisten>
-  hide(): Promise<void>
+  listen(event: string, handler: (payload: unknown) => void): MaybePromise<Unlisten>
+  onCloseRequested(handler: CloseRequestedHandler): MaybePromise<Unlisten>
+  hide(): MaybePromise<void>
 }
 
 /**
@@ -66,9 +66,9 @@ export interface WindowService {
   readonly label: string
   isMainWindow(): boolean
   /**
-   * Set the OS window title. Best-effort: a failure is ignored.
+   * Set the OS window title.
    */
-  setTitle(title: string): void
+  setTitle(title: string): MaybePromise<void>
   /**
    * Open or focus a note window on a `reflect://` link. Concurrent calls for
    * one link share a request. False when the host has no secondary windows
@@ -126,8 +126,12 @@ class WindowServiceImpl implements WindowService {
     return this.#deps.host.label === MAIN_WINDOW_LABEL
   }
 
-  setTitle(title: string): void {
-    this.#deps.host.setTitle(title).catch(() => {})
+  async setTitle(title: string): Promise<void> {
+    try {
+      await this.#deps.host.setTitle(title)
+    } catch (cause: unknown) {
+      this.#deps.logger.error('setting the window title failed:', errorMessage(cause))
+    }
   }
 
   async openNoteWindow(deepLink: string): Promise<boolean> {
@@ -186,11 +190,11 @@ class WindowServiceImpl implements WindowService {
     return this.#track(() => this.#deps.host.listen(event, listener), event)
   }
 
-  focusedWindowLabel(): Promise<string | null> {
+  focusedWindowLabel(): MaybePromise<string | null> {
     return this.#deps.host.focusedWindowLabel()
   }
 
-  emitTo(label: string, event: string, payload: unknown): Promise<void> {
+  emitTo(label: string, event: string, payload: unknown): MaybePromise<void> {
     return this.#deps.host.emitTo(label, event, payload)
   }
 
@@ -198,7 +202,7 @@ class WindowServiceImpl implements WindowService {
     return this.#track(() => this.#deps.host.onCloseRequested(handler), 'close-requested')
   }
 
-  hide(): Promise<void> {
+  hide(): MaybePromise<void> {
     return this.#deps.host.hide()
   }
 
@@ -206,7 +210,7 @@ class WindowServiceImpl implements WindowService {
     await this.#deps.ipc.call('toggle_devtools', {}, z.null())
   }
 
-  #track(register: () => Promise<Unlisten>, what: string): Unlisten {
+  #track(register: () => MaybePromise<Unlisten>, what: string): Unlisten {
     return listenNow(register, (cause) => {
       this.#deps.logger.error(`${what} listener failed:`, cause)
     })

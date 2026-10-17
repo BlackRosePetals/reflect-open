@@ -44,14 +44,16 @@ describe('createWindowService', () => {
     expect(note.isMainWindow()).toBe(false)
   })
 
-  it('swallows a failed title change', async () => {
+  it('logs a failed title change', async () => {
     const setTitle = vi.fn(async () => {
       throw new Error('gone')
     })
-    const { window } = setup({ host: { setTitle } })
-    expect(() => window.setTitle('Note A')).not.toThrow()
-    await settle()
+    const { window, logger } = setup({ host: { setTitle } })
+    await window.setTitle('Note A')
     expect(setTitle).toHaveBeenCalledWith('Note A')
+    expect(logger.getErrors()).toEqual([
+      { message: 'setting the window title failed:', cause: 'gone' },
+    ])
   })
 
   it('shares one open_note_window request between concurrent opens of one link', async () => {
@@ -176,14 +178,14 @@ describe('createWindowService', () => {
     const hide = vi.fn(async () => {})
     const { window } = setup({
       host: {
-        focusedWindowLabel: async () => 'note-2',
+        focusedWindowLabel: () => 'note-2',
         emitTo,
         hide,
-        listen: async (event, handler): Promise<Unlisten> => {
+        listen: (event, handler): Unlisten => {
           handlers.set(event, handler)
           return removed
         },
-        onCloseRequested: async (handler) => {
+        onCloseRequested: (handler) => {
           closeHandler = handler
           return removed
         },
@@ -200,7 +202,7 @@ describe('createWindowService', () => {
     unlistenEvent()
     unlistenClose()
 
-    await expect(window.focusedWindowLabel()).resolves.toBe('note-2')
+    expect(await window.focusedWindowLabel()).toBe('note-2')
     expect(received).toHaveBeenCalledWith('note.find')
     expect(emitTo).toHaveBeenCalledWith('note-2', 'menu', 'note.find')
     expect(hide).toHaveBeenCalledOnce()
