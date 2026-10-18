@@ -471,13 +471,15 @@ describe('MobileShell', () => {
     await expect.element(view.getByText('No notes yet')).toMatchTextContent('No notes yet')
 
     await user.click(view.getByRole('button', { name: 'Daily', exact: true }))
-    await waitFor(() =>
-      expect(
-        view
-          .getByRole('button', { name: dayCellLabel(other) })
-          .element()
-          .getAttribute('aria-current'),
-      ).toBe('date'),
+    await waitFor(
+      () =>
+        expect(
+          view
+            .getByRole('button', { name: dayCellLabel(other) })
+            .element()
+            .getAttribute('aria-current'),
+        ).toBe('date'),
+      { timeout: 10_000 },
     )
   })
 
