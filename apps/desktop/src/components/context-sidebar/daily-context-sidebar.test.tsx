@@ -56,9 +56,9 @@ function createApp(storage: TestStorageService = createTestStorageService()) {
     retrieval: createTestRetrievalService({ relatedNotes }),
   })
   vi.spyOn(app.dailyNotes, 'dailyDatesInRange').mockImplementation(dailyDatesInRange)
-  vi.spyOn(app.indexQuery, 'getNote').mockImplementation(() =>
-    Promise.resolve(noteRowAnswer ?? undefined),
-  )
+  vi.spyOn(app.indexQuery, 'getNote').mockImplementation(() => {
+    return Promise.resolve(noteRowAnswer ?? undefined)
+  })
   return app
 }
 
@@ -118,14 +118,14 @@ describe('DailyContextSidebar calendar', () => {
 
     fireEvent.click(day, { metaKey: true, ctrlKey: true })
 
-    await vi.waitFor(() =>
+    await vi.waitFor(() => {
       expect(openNoteWindow).toHaveBeenCalledWith(
         deepLinkForRoute({
           kind: 'daily',
           date: '2026-06-18',
         }),
-      ),
-    )
+      )
+    })
     expect(openNoteWindow).toHaveBeenCalledTimes(1)
     await expect
       .element(page.getByTestId('route'))
@@ -179,9 +179,9 @@ describe('DailyContextSidebar related notes', () => {
   it('does not calculate Similar notes for an empty-bullet daily note', async () => {
     dailySource = '- \n'
     await renderSidebar('2026-06-09')
-    await vi.waitFor(() =>
-      expect(noteFile.getReads().map((read) => read.path)).toContain('daily/2026-06-09.md'),
-    )
+    await vi.waitFor(() => {
+      expect(noteFile.getReads().map((read) => read.path)).toContain('daily/2026-06-09.md')
+    })
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(relatedNotes).not.toHaveBeenCalled()
     await expect.element(page.getByText('Similar notes')).not.toBeInTheDocument()

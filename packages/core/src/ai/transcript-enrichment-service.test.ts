@@ -55,13 +55,14 @@ beforeEach(() => {
 function modelAnswering(text: string): void {
   languageModelService.setModel(
     new MockLanguageModelV3({
-      doGenerate: () =>
-        Promise.resolve({
+      doGenerate: () => {
+        return Promise.resolve({
           content: [{ type: 'text', text: JSON.stringify({ title: text }) }],
           finishReason: { unified: 'stop' as const, raw: undefined },
           usage: USAGE,
           warnings: [],
-        }),
+        })
+      },
     }),
   )
 }
@@ -69,10 +70,11 @@ function modelAnswering(text: string): void {
 function modelThrowing(error: unknown): void {
   languageModelService.setModel(
     new MockLanguageModelV3({
-      doGenerate: () =>
-        Promise.try(() => {
+      doGenerate: () => {
+        return Promise.try(() => {
           throw error
-        }),
+        })
+      },
     }),
   )
 }

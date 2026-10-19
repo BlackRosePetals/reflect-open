@@ -120,7 +120,10 @@ async function renderRoute(route: Route, platform?: TestPlatformOptions) {
   })
   return await renderInApp(
     <PaletteProvider>
-      <RouteContent />
+      {/* A bounded viewport, like the app shell's: the stream virtualizes its rows. */}
+      <div style={{ height: 800 }}>
+        <RouteContent />
+      </div>
       <PaletteProbe />
     </PaletteProvider>,
     {
@@ -273,12 +276,12 @@ describe('RouteContent', () => {
   it('arriving on a search route opens the palette pre-filled over the stream', async () => {
     const view = await renderRoute({ kind: 'search', query: 'roadmap' })
     await expect.element(page.getByTestId('daily-stream')).toBeInTheDocument()
-    await vi.waitFor(() =>
+    await vi.waitFor(() => {
       expect(JSON.parse(page.getByTestId('palette').element().textContent ?? '')).toEqual({
         open: true,
         query: 'roadmap',
-      }),
-    )
+      })
+    })
     await view.unmount()
   })
 })

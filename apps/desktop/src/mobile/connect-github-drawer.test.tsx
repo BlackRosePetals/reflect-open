@@ -75,16 +75,19 @@ describe('ConnectGithubDrawer', () => {
     await expect.element(page.getByLabelText('Repository name')).toHaveValue('reflect-backup')
     await page.getByRole('button', { name: 'Continue' }).click()
 
-    await vi.waitFor(() =>
+    await vi.waitFor(() => {
       expect(backup.calls()).toContainEqual({
         method: 'connectExistingRepo',
         ref: { owner: 'alex', name: 'reflect-backup' },
         allowPublic: false,
-      }),
-    )
-    await vi.waitFor(() =>
-      expect(backup.calls()).toContainEqual({ method: 'connectNewRepo', name: 'reflect-backup' }),
-    )
+      })
+    })
+    await vi.waitFor(() => {
+      expect(backup.calls()).toContainEqual({
+        method: 'connectNewRepo',
+        name: 'reflect-backup',
+      })
+    })
     await vi.waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
   })
 
@@ -100,13 +103,13 @@ describe('ConnectGithubDrawer', () => {
     })
     await page.getByRole('button', { name: 'Continue' }).click()
 
-    await vi.waitFor(() =>
+    await vi.waitFor(() => {
       expect(backup.calls()).toContainEqual({
         method: 'connectExistingRepo',
         ref: { owner: 'alex', name: 'notes' },
         allowPublic: false,
-      }),
-    )
+      })
+    })
     await vi.waitFor(() => expect(onOpenChange).toHaveBeenCalledWith(false))
   })
 

@@ -63,14 +63,14 @@ describe('TemplatesSection note links', () => {
 
     await page.getByText('templates/weekly-review.md').click({ modifiers: ['ControlOrMeta'] })
 
-    await vi.waitFor(() =>
+    await vi.waitFor(() => {
       expect(openNoteWindow).toHaveBeenCalledWith(
         deepLinkForRoute({
           kind: 'note',
           path: 'templates/weekly-review.md',
         }),
-      ),
-    )
+      )
+    })
     expect(page.getByTestId('route').element().textContent).toBe('settings')
   })
 })

@@ -47,7 +47,7 @@ describe('ImportSection', () => {
 
     await importButton().click()
 
-    await vi.waitFor(() =>
+    await vi.waitFor(() => {
       expect(dialog.calls()).toEqual([
         {
           kind: 'files',
@@ -57,13 +57,13 @@ describe('ImportSection', () => {
             filters: [{ name: 'Zip archives', extensions: ['zip'] }],
           },
         },
-      ]),
-    )
-    await vi.waitFor(() =>
+      ])
+    })
+    await vi.waitFor(() => {
       expect(importCalls(app)).toEqual([
         { path: '/Users/alex/Downloads/reflect-v1.zip', generation: 4 },
-      ]),
-    )
+      ])
+    })
   })
 
   it('does nothing when the picker is cancelled', async () => {

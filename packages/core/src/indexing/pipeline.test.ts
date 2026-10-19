@@ -295,20 +295,19 @@ describe('rebuild', () => {
     const { indexer, store, methods } = setup({
       files: notes('notes/a.md', 'notes/b.md', 'notes/c.md'),
       store: {
-        fail: (call) =>
-          call.method === 'applyBatch' && call.notes.length > 1
+        fail: (call) => {
+          return call.method === 'applyBatch' && call.notes.length > 1
             ? new Error('batch payload refused')
-            : undefined,
+            : undefined
+        },
       },
     })
 
     await indexer.rebuild({ generation: 1, fileGeneration: FILE_GENERATION })
 
-    const attempted = store
-      .calls()
-      .flatMap((call) =>
-        call.method === 'applyBatch' ? [call.notes.map((note) => note.path)] : [],
-      )
+    const attempted = store.calls().flatMap((call) => {
+      return call.method === 'applyBatch' ? [call.notes.map((note) => note.path)] : []
+    })
     expect(attempted).toEqual([
       ['notes/a.md', 'notes/b.md', 'notes/c.md'],
       ['notes/a.md', 'notes/b.md'],
@@ -328,10 +327,11 @@ describe('rebuild', () => {
     const { indexer, methods } = setup({
       files: notes('notes/bad.md'),
       store: {
-        fail: (call) =>
-          call.method === 'applyBatch'
+        fail: (call) => {
+          return call.method === 'applyBatch'
             ? new AppError('parse', 'unexpected end of hex escape')
-            : undefined,
+            : undefined
+        },
       },
     })
     const skipped: Array<{ path: string; message: string }> = []
@@ -352,8 +352,9 @@ describe('rebuild', () => {
     const { indexer, methods } = setup({
       files: notes('notes/bad.md'),
       store: {
-        fail: (call) =>
-          call.method === 'applyBatch' ? new Error('single note refused') : undefined,
+        fail: (call) => {
+          return call.method === 'applyBatch' ? new Error('single note refused') : undefined
+        },
       },
     })
 

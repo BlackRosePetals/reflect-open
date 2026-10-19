@@ -599,11 +599,11 @@ describe('start', () => {
     vi.spyOn(secrets, 'get').mockRejectedValue(new Error('locked'))
     service().start()
 
-    await vi.waitFor(() =>
+    await vi.waitFor(() => {
       expect(logger.getErrors()).toEqual([
         { message: 'Reading the Reflect Classic access failed', cause: new Error('locked') },
-      ]),
-    )
+      ])
+    })
   })
 
   it('does nothing off iOS', () => {

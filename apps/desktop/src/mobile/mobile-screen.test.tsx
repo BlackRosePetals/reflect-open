@@ -93,8 +93,9 @@ vi.mock('@/editor/note-editor.tsx', async () => {
 // honours `open`, so the month-picker sheet renders only once the title
 // opens it.
 vi.mock('@/components/ui/drawer.tsx', () => ({
-  Drawer: ({ open, children }: { open?: boolean; children?: import('react').ReactNode }) =>
-    open ? <div data-testid="drawer">{children}</div> : null,
+  Drawer: ({ open, children }: { open?: boolean; children?: import('react').ReactNode }) => {
+    return open ? <div data-testid="drawer">{children}</div> : null
+  },
   DrawerContent: ({ children }: { children?: import('react').ReactNode }) => <div>{children}</div>,
   DrawerBody: ({ children }: { children?: import('react').ReactNode }) => <div>{children}</div>,
   DrawerDescription: ({ children }: { children?: import('react').ReactNode }) => <p>{children}</p>,
@@ -264,14 +265,14 @@ describe('MobileShell', () => {
     expect(todayButton.element().hasAttribute('inert')).toBe(true)
 
     await user.click(view.getByRole('button', { name: dayCellLabel(other) }))
-    await waitFor(() =>
+    await waitFor(() => {
       expect(
         view
           .getByRole('button', { name: dayCellLabel(other) })
           .element()
           .getAttribute('aria-current'),
-      ).toBe('date'),
-    )
+      ).toBe('date')
+    })
     expect(
       view.getByRole('button', { name: 'Today' }).element().classList.contains('opacity-100'),
     ).toBe(true)
@@ -363,14 +364,14 @@ describe('MobileShell', () => {
     await user.click(view.getByRole('button', { name: monthLabel(monthOf(today)) }))
 
     expect(view.getByTestId('drawer').query()).toBeNull()
-    await waitFor(() =>
+    await waitFor(() => {
       expect(
         view
           .getByRole('button', { name: dayCellLabel(today) })
           .element()
           .getAttribute('aria-current'),
-      ).toBe('date'),
-    )
+      ).toBe('date')
+    })
     expect(view.getByRole('button', { name: 'Today' }).query()).toBeNull()
   })
 
@@ -458,14 +459,14 @@ describe('MobileShell', () => {
     const view = await mount({ kind: 'today' })
 
     await user.click(view.getByRole('button', { name: dayCellLabel(other) }))
-    await waitFor(() =>
+    await waitFor(() => {
       expect(
         view
           .getByRole('button', { name: dayCellLabel(other) })
           .element()
           .getAttribute('aria-current'),
-      ).toBe('date'),
-    )
+      ).toBe('date')
+    })
 
     await user.click(view.getByRole('button', { name: 'All' }))
     await expect.element(view.getByRole('searchbox', { name: 'Search notes' })).toBeVisible()
@@ -473,13 +474,14 @@ describe('MobileShell', () => {
 
     await user.click(view.getByRole('button', { name: 'Daily', exact: true }))
     await waitFor(
-      () =>
+      () => {
         expect(
           view
             .getByRole('button', { name: dayCellLabel(other) })
             .element()
             .getAttribute('aria-current'),
-        ).toBe('date'),
+        ).toBe('date')
+      },
       { timeout: 10_000 },
     )
   })
@@ -554,14 +556,14 @@ describe('MobileShell', () => {
     const view = await mount({ kind: 'daily', date: other })
 
     await user.click(view.getByRole('button', { name: 'Daily', exact: true }))
-    await waitFor(() =>
+    await waitFor(() => {
       expect(
         view
           .getByRole('button', { name: dayCellLabel(other) })
           .element()
           .getAttribute('aria-current'),
-      ).toBe('date'),
-    )
+      ).toBe('date')
+    })
     expect(
       view
         .getByRole('button', { name: dayCellLabel(today) })
@@ -633,7 +635,7 @@ describe('MobileShell', () => {
     await act(() => appServices.keyboard.publish(316))
     expect(view.getByRole('toolbar', { name: 'Formatting' }).query()).toBeNull()
 
-    await act(() =>
+    await act(() => {
       publishFormattingToolbar(owner, {
         capabilities: {
           canIndent: true,
@@ -654,8 +656,8 @@ describe('MobileShell', () => {
           attachFiles: vi.fn(),
           scrollCaretIntoView: vi.fn(),
         },
-      }),
-    )
+      })
+    })
     await expect.element(view.getByRole('toolbar', { name: 'Formatting' })).toBeVisible()
     expect(view.getByRole('navigation', { name: 'Sections' }).query()).toBeNull()
 

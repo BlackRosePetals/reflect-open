@@ -70,8 +70,9 @@ async function setup(provider: AiProviderConfig = OPENAI) {
       </SidebarProvider>
     ),
   })
-  const cancels = (): number =>
-    app.audioRecorder.calls().filter((call) => call.method === 'cancel').length
+  const cancels = (): number => {
+    return app.audioRecorder.calls().filter((call) => call.method === 'cancel').length
+  }
   return { ...hook, app, cancels }
 }
 
@@ -179,12 +180,12 @@ describe('AudioMemoProvider', () => {
       result.current.sidebar.toggleSidebar()
     })
 
-    await vi.waitFor(() =>
+    await vi.waitFor(() => {
       expect(app.progress.findByLabel('Saving audio memo')).toMatchObject({
         status: 'failed',
         message: 'disk full',
-      }),
-    )
+      })
+    })
     expect(result.current.memo.error).toBe('disk full')
     expect(result.current.memo.canRetry).toBe(true)
   })
