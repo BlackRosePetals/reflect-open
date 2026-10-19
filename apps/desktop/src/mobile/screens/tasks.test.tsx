@@ -14,6 +14,7 @@ import { useRouter } from '@/routing/router.tsx'
 import '@/test-utils/locator.ts'
 import { renderInApp } from '@/test-utils/render-in-app.tsx'
 import { swipe, translateX } from '@/test-utils/swipe.ts'
+import { createWasmTestDatabaseService } from '@/test-utils/test-database.ts'
 import { MobileTasks } from './tasks.tsx'
 
 let haptics: TestHapticsService
@@ -28,14 +29,6 @@ let haptics: TestHapticsService
  * rules are unit-tested in task-visibility.test.ts.
  */
 
-// TaskText rendering is covered separately, so this suite keeps a small preview stub.
-vi.mock('@/editor/markdown-preview.tsx', () => ({
-  MarkdownPreview: ({ content, className }: { content: string; className?: string }) => (
-    <span data-testid="markdown-preview" className={className}>
-      {content}
-    </span>
-  ),
-}))
 const editorProbe = vi.hoisted(() => ({ focusCalls: 0 }))
 
 // The sheet hosts the real markdown editor (desktop's inline task-editor
@@ -238,6 +231,7 @@ beforeEach(async () => {
   await page.viewport(375, 700)
   // A fresh service per test, so its recently-completed set starts empty.
   app = createTestCoreServices({
+    database: createWasmTestDatabaseService(),
     // Reduced motion: an instant settle, so row transforms can be asserted synchronously.
     platform: createTestPlatformService({ reducedMotion: true }),
   })

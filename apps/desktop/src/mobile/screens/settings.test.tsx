@@ -10,6 +10,7 @@ import {
 } from '@reflect/core/testing'
 import '@/test-utils/locator.ts'
 import { renderInApp } from '@/test-utils/render-in-app.tsx'
+import { createWasmTestDatabaseService } from '@/test-utils/test-database.ts'
 import { MobileSettings } from './settings.tsx'
 
 /**
@@ -27,13 +28,6 @@ vi.mock('@/components/ui/drawer.tsx', () => ({
   DrawerContent: ({ children }: { children?: import('react').ReactNode }) => <div>{children}</div>,
   DrawerBody: ({ children }: { children?: import('react').ReactNode }) => <div>{children}</div>,
   DrawerTitle: ({ children }: { children?: import('react').ReactNode }) => <h2>{children}</h2>,
-}))
-
-// The sheet itself is covered by connect-github-drawer.test.tsx; the screen
-// test only cares that Settings opens it.
-vi.mock('@/mobile/connect-github-drawer.tsx', () => ({
-  ConnectGithubDrawer: ({ open }: { open: boolean }) =>
-    open ? <div>connect-github-sheet</div> : null,
 }))
 
 function connected(status: Extract<BackupState, { phase: 'connected' }>['status']): BackupState {
@@ -68,6 +62,7 @@ async function mount(options?: MountOptions) {
     state: options?.backup ?? connected({ state: 'idle' }),
   })
   const app = createTestCoreServices({
+    database: createWasmTestDatabaseService(),
     appInfo: createTestAppInfoService('1.2.3-beta.4'),
     backup,
     // A note window's graph runs no backup.
@@ -383,7 +378,7 @@ describe('MobileSettings', () => {
       .toBeVisible()
     await user.click(page.getByRole('button', { name: 'Connect GitHub' }))
 
-    await expect.element(page.getByText('connect-github-sheet')).toBeVisible()
+    await expect.element(page.getByRole('heading', { name: 'Connect GitHub' })).toBeVisible()
   })
 
   it('hides the connect row once the local graph is connected', async () => {

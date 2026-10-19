@@ -14,30 +14,9 @@ import { fireEvent } from '@/test-utils/fire-event.ts'
 import { MOD_KEY } from '@/test-utils/mod-key.ts'
 import '@/test-utils/locator.ts'
 import { renderInApp } from '@/test-utils/render-in-app.tsx'
+import { createWasmTestDatabaseService } from '@/test-utils/test-database.ts'
 import { TasksScreen } from './tasks-screen.tsx'
 import { deepLinkForRoute } from '@reflect/app'
-
-vi.mock('@/editor/markdown-preview.tsx', () => ({
-  MarkdownPreview: ({ content, className }: { content: string; className?: string }) => {
-    const strong = /^(.*)\*\*([^*]+)\*\*(.*)$/u.exec(content)
-    const before = strong?.[1] ?? ''
-    const label = strong?.[2] ?? ''
-    const after = strong?.[3] ?? ''
-    return (
-      <span data-testid="markdown-preview" className={className}>
-        {strong === null ? (
-          content
-        ) : (
-          <>
-            {before}
-            <strong>{label}</strong>
-            {after}
-          </>
-        )}
-      </span>
-    )
-  },
-}))
 
 // The screen runs on the real `TaskService` of the test app services; each
 // test steers its reads and writes through these spies.
@@ -244,7 +223,7 @@ let noteWindows: TestWindowService
 
 beforeEach(() => {
   // A fresh app per test, so its task service's recently-completed set starts empty.
-  app = createTestCoreServices()
+  app = createTestCoreServices({ database: createWasmTestDatabaseService() })
   noteWindows = createTestWindowService()
   operations = app.progress
   storage = app.storage
@@ -563,9 +542,12 @@ describe('TasksScreen', () => {
     ])
     const view = await renderScreen()
 
-    const row = await view.findByRole('button', { name: 'ship bold text' })
-    expect(row.querySelector('strong')?.textContent).toBe('bold')
-    expect(row.textContent).not.toContain('**bold**')
+    // The preview hides the `**` marks; they stay in the DOM as `.md-mark`.
+    const strong = view
+      .getByRole('button', { name: /^ship/ })
+      .locate('[data-mark-mode="hide"] strong')
+    await expect.element(strong).toBeInTheDocument()
+    expect(strong.element().textContent?.replaceAll('**', '')).toBe('bold')
     await view.unmount()
   })
 
