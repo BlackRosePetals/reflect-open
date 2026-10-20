@@ -185,8 +185,9 @@ hand-edit the changelogs or manifests outside the flows above, and do not use
 `Release-As:` commit footers: human version interventions go through the manifest
 files, and a major
 graduation such as `1.0.0` is a one-time `release-as` in both config files. The first beta of
-a new cycle is tagged without a number (`v0.6.0-beta`, then `-beta.1`, `-beta.2`, …)
-— a release-please naming quirk, not a bug.
+a new cycle is `-beta.1` (`v0.6.0-beta.1`, then `-beta.2`, `-beta.3`, …). release-please
+uses `prerelease-type` as the whole prerelease part of a cycle's first version, so
+`config.beta.json` sets it to `beta.1` instead of `beta`.
 
 ### Retrying a release
 
