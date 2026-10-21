@@ -1,10 +1,17 @@
 import { useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { ExternalLink } from 'lucide-react'
-import { isICloudRoot, suggestRepoName } from '@reflect/core'
+import {
+  githubRepoOf,
+  isICloudRoot,
+  redactRemoteUrl,
+  suggestRepoName,
+  type GithubRepoRef,
+} from '@reflect/core'
 import { CountdownText } from '@/components/countdown-text.tsx'
 import { ConnectGithubDialog } from '@/components/settings/connect-github-dialog.tsx'
 import { SettingsField } from '@/components/settings/field.tsx'
+import { GithubSignInDialog } from '@/components/settings/github-sign-in-dialog.tsx'
 import { GithubSignOutRow } from '@/components/settings/github-sign-out-row.tsx'
 import { SyncForkNotice } from '@/components/settings/sync-fork-notice.tsx'
 import { Button } from '@/components/ui/button.tsx'
@@ -37,16 +44,65 @@ function GitSyncStatusLine({
     case 'error':
       // "Reconnect GitHub" only helps when GitHub is the remote; a generic
       // remote's auth message already names the fix (ssh-add, known_hosts…).
-      return state.status.errorKind === 'auth' && state.repo !== null
+      return state.status.errorKind === 'auth' && state.remote.kind === 'github'
         ? 'Backup failed — reconnect GitHub'
         : `Backup failed: ${state.status.message}`
   }
 }
 
-function githubRepoBrowserUrl(
-  repo: NonNullable<Extract<GitSyncState, { phase: 'connected' }>['repo']>,
-): string {
+function githubRepoBrowserUrl(repo: GithubRepoRef): string {
   return `https://github.com/${repo.owner}/${repo.name}`
+}
+
+/** `owner/name` for GitHub, the URL (less any user info) for any other remote. */
+function remoteLabel(state: Extract<GitSyncState, { phase: 'connected' | 'needsCredential' }>) {
+  const repo = githubRepoOf(state.remote)
+  return repo !== null ? `${repo.owner}/${repo.name}` : redactRemoteUrl(state.remoteUrl)
+}
+
+/**
+ * A remote that waits for its sign-in (Plan 25): the GitHub account signed
+ * out, or a host that has no in-app sign-in yet. Named, with the one action
+ * that resumes it, and the option to stop. Never hidden: a graph whose
+ * remote vanished from Settings looks disconnected, and the user would
+ * connect a second one.
+ */
+function NeedsCredentialRows({
+  state,
+  onSignIn,
+  stopButton,
+}: {
+  state: Extract<GitSyncState, { phase: 'needsCredential' }>
+  onSignIn: () => void
+  stopButton: ReactNode
+}): ReactElement {
+  const github = state.remote.kind === 'github'
+  const host = state.remote.kind === 'https' ? new URL(state.remote.origin).host : null
+  // The resolver never sends a sign-in in the clear, so there is nothing to wait for.
+  const plainHttp = state.remote.kind === 'https' && state.remote.origin.startsWith('http:')
+  return (
+    <>
+      <p className="text-sm text-text">
+        <span className="font-medium">{remoteLabel(state)}</span>
+        <span className="ml-2 text-xs text-text-muted">Sign-in needed</span>
+      </p>
+      <p className="text-xs text-text-muted">
+        {github
+          ? 'Sign in to GitHub to resume backing up. Your notes keep their local history meanwhile.'
+          : plainHttp
+            ? `Backup never sends a sign-in to ${host ?? 'this host'} over plain HTTP. Switch the remote to its SSH form to resume.`
+            : `Backup cannot sign in to ${host ?? 'this host'} over HTTPS yet. Switch the remote to its SSH form to resume.`}
+      </p>
+      <div className="flex flex-wrap gap-2">
+        {github ? (
+          <Button size="sm" onClick={onSignIn}>
+            Sign in to GitHub…
+          </Button>
+        ) : null}
+        {stopButton}
+      </div>
+    </>
+  )
 }
 
 /**
@@ -60,6 +116,7 @@ export function GitSyncSettingsField(): ReactElement {
   const { opener } = useAppServices()
   const githubConnected = useGithubConnected()
   const [connectOpen, setConnectOpen] = useState(false)
+  const [signInOpen, setSignInOpen] = useState(false)
   const openRepoAttemptRef = useRef(0)
   const action = useAsyncAction()
 
@@ -72,21 +129,18 @@ export function GitSyncSettingsField(): ReactElement {
   })
   const forkGroups = duplicateIds.data ?? []
 
-  const repoLabel =
-    state.phase === 'connected'
-      ? state.repo !== null
-        ? `${state.repo.owner}/${state.repo.name}`
-        : state.remoteUrl
-      : null
+  const repo = state.phase === 'connected' ? githubRepoOf(state.remote) : null
   // A hand-wired non-GitHub remote (Plan 16) renders the section host-neutral.
-  const genericRemote = state.phase === 'connected' && state.repo === null
+  const genericRemote =
+    (state.phase === 'connected' || state.phase === 'needsCredential') &&
+    state.remote.kind !== 'github'
   const hosted = graph !== null && isICloudRoot(graph.root)
 
   function openGithubRepo(): void {
-    if (state.phase !== 'connected' || state.repo === null) {
+    if (repo === null) {
       return
     }
-    const url = githubRepoBrowserUrl(state.repo)
+    const url = githubRepoBrowserUrl(repo)
     const attempt = openRepoAttemptRef.current + 1
     openRepoAttemptRef.current = attempt
     action.setError(null)
@@ -103,6 +157,17 @@ export function GitSyncSettingsField(): ReactElement {
         }
       })
   }
+
+  const stopButton = (
+    <Button
+      variant="ghost"
+      size="sm"
+      title="This graph stops backing up; its history and your GitHub sign-in stay"
+      onClick={() => void action.run(disconnectGraph)}
+    >
+      Stop backing up
+    </Button>
+  )
 
   return (
     <>
@@ -143,10 +208,18 @@ export function GitSyncSettingsField(): ReactElement {
             </>
           ) : null}
 
+          {state.phase === 'needsCredential' ? (
+            <NeedsCredentialRows
+              state={state}
+              onSignIn={() => setSignInOpen(true)}
+              stopButton={stopButton}
+            />
+          ) : null}
+
           {state.phase === 'connected' ? (
             <>
               <p className="text-sm text-text">
-                <span className="font-medium">{repoLabel}</span>
+                <span className="font-medium">{remoteLabel(state)}</span>
                 <span className="ml-2 text-xs text-text-muted">
                   <GitSyncStatusLine state={state} />
                 </span>
@@ -161,22 +234,15 @@ export function GitSyncSettingsField(): ReactElement {
                 >
                   Back up now
                 </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  title="This graph stops backing up; its history and your GitHub sign-in stay"
-                  onClick={() => void action.run(disconnectGraph)}
-                >
-                  Stop backing up
-                </Button>
-                {state.repo !== null ? (
+                {stopButton}
+                {repo !== null ? (
                   <Button variant="ghost" size="sm" onClick={openGithubRepo}>
                     <ExternalLink aria-hidden />
                     Open GitHub repo
                   </Button>
                 ) : null}
               </div>
-              {state.repo !== null ? (
+              {repo !== null ? (
                 <GithubSignOutRow
                   signOut={signOut}
                   description="Sign out on this machine; connected graphs stop backing up."
@@ -196,6 +262,7 @@ export function GitSyncSettingsField(): ReactElement {
           onClose={() => setConnectOpen(false)}
         />
       ) : null}
+      {signInOpen ? <GithubSignInDialog onClose={() => setSignInOpen(false)} /> : null}
     </>
   )
 }

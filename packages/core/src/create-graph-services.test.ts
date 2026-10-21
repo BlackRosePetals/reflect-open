@@ -61,7 +61,9 @@ function sessionDeps(app: TestCoreServices) {
     gitSync: {
       git: app.gitRepository,
       syncEngines: app.syncEngines,
+      credentials: app.credentials,
       githubAuth: app.githubAuth,
+      hostCredentials: app.hostCredentials,
       githubRepos: app.githubRepos,
       fileChanges,
       indexLifecycle,

@@ -35,7 +35,8 @@ function connected(status: Extract<GitSyncState, { phase: 'connected' }>['status
   return {
     phase: 'connected',
     remoteUrl: 'https://github.com/alex/notes.git',
-    repo: { owner: 'alex', name: 'notes' },
+    remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+    isPrimaryChannel: true,
     status,
   }
 }
@@ -367,6 +368,51 @@ describe('MobileSettings', () => {
       const methods = view.gitSync.calls().map((call) => call.method)
       expect(methods.filter((method) => method === 'disconnectGraph')).toHaveLength(1)
       expect(methods.filter((method) => method === 'signOut')).toHaveLength(1)
+    })
+  })
+
+  it('offers a GitHub sign-in for a remote that waits for it', async () => {
+    await mount({
+      gitSync: {
+        phase: 'needsCredential',
+        remoteUrl: 'https://github.com/alex/notes.git',
+        remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      },
+    })
+
+    await expect.element(page.getByText('alex/notes')).toBeVisible()
+    await expect.element(page.getByText('Sign-in needed')).toBeVisible()
+    await expect.element(page.getByText(/Sign in to GitHub to resume/)).toBeVisible()
+    await expect
+      .element(page.getByRole('button', { name: 'Connect GitHub', exact: true }))
+      .not.toBeInTheDocument()
+
+    await userEvent.click(page.getByRole('button', { name: 'Sign in to GitHub' }))
+    await expect.element(page.getByRole('heading', { name: 'Sign in to GitHub' })).toBeVisible()
+  })
+
+  it('names a host remote without its user info and stops it without a sign-out', async () => {
+    const user = userEvent
+    const view = await mount({
+      gitSync: {
+        phase: 'needsCredential',
+        remoteUrl: 'https://alex:token@gitlab.com/alex/notes.git',
+        remote: { kind: 'https', origin: 'https://gitlab.com' },
+      },
+    })
+
+    await expect.element(page.getByText('https://gitlab.com/alex/notes.git')).toBeVisible()
+    await expect.element(page.getByText(/token/)).not.toBeInTheDocument()
+    await expect.element(page.getByText('Sign-in needed')).toBeVisible()
+    await expect
+      .element(page.getByRole('button', { name: 'Sign in to GitHub' }))
+      .not.toBeInTheDocument()
+
+    await user.click(page.getByRole('button', { name: 'Stop backing up' }))
+    await vi.waitFor(() => {
+      const methods = view.gitSync.calls().map((call) => call.method)
+      expect(methods.filter((method) => method === 'disconnectGraph')).toHaveLength(1)
+      expect(methods).not.toContain('signOut')
     })
   })
 

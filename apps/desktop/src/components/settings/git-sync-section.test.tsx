@@ -78,7 +78,8 @@ describe('GitSyncSettingsField', () => {
       {
         phase: 'connected',
         remoteUrl: 'https://github.com/alex/notes.git',
-        repo: { owner: 'alex', name: 'notes' },
+        remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+        isPrimaryChannel: true,
         status: { state: 'idle' },
       },
       ICLOUD_GRAPH,
@@ -94,7 +95,8 @@ describe('GitSyncSettingsField', () => {
     await renderSection({
       phase: 'connected',
       remoteUrl: 'https://github.com/alex/notes.git',
-      repo: { owner: 'alex', name: 'notes' },
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      isPrimaryChannel: true,
       status: { state: 'waiting', until: 2 * 60_000 + 1 },
     })
     await expect.element(page.getByText('Backs up in 2 minutes')).toBeVisible()
@@ -104,7 +106,8 @@ describe('GitSyncSettingsField', () => {
     const app = await renderSection({
       phase: 'connected',
       remoteUrl: 'https://github.com/alex/notes.git',
-      repo: { owner: 'alex', name: 'notes' },
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      isPrimaryChannel: true,
       status: { state: 'waiting', until: 3 * 60_000 },
     })
     await expect.element(page.getByText('Backs up in 3 minutes')).toBeVisible()
@@ -117,7 +120,8 @@ describe('GitSyncSettingsField', () => {
       {
         phase: 'connected',
         remoteUrl: 'git@gitlab.com:alex/notes.git',
-        repo: null,
+        remote: { kind: 'ssh', host: 'gitlab.com' },
+        isPrimaryChannel: true,
         status: { state: 'idle' },
       },
       ICLOUD_GRAPH,
@@ -132,7 +136,8 @@ describe('GitSyncSettingsField', () => {
     await renderSection({
       phase: 'connected',
       remoteUrl: 'git@gitlab.com:alex/notes.git',
-      repo: null,
+      remote: { kind: 'ssh', host: 'gitlab.com' },
+      isPrimaryChannel: true,
       status: AUTH_ERROR,
     })
 
@@ -151,11 +156,61 @@ describe('GitSyncSettingsField', () => {
       .not.toBeInTheDocument()
   })
 
+  it('names a GitHub remote that waits for its sign-in and offers to sign in', async () => {
+    await renderSection({
+      phase: 'needsCredential',
+      remoteUrl: 'https://github.com/alex/notes.git',
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+    })
+
+    await expect.element(page.getByText('alex/notes')).toBeVisible()
+    await expect.element(page.getByText('Sign-in needed')).toBeVisible()
+    await expect.element(page.getByRole('button', { name: 'Stop backing up' })).toBeVisible()
+    // Not the connect wizard: the remote is already there.
+    await expect
+      .element(page.getByRole('button', { name: 'Connect GitHub…' }))
+      .not.toBeInTheDocument()
+
+    await userEvent.click(page.getByRole('button', { name: 'Sign in to GitHub…' }))
+    await expect.element(page.getByRole('heading', { name: 'Sign in to GitHub' })).toBeVisible()
+  })
+
+  it('explains the SSH form for a host remote that waits for its sign-in', async () => {
+    await renderSection({
+      phase: 'needsCredential',
+      remoteUrl: 'https://gitlab.com/alex/notes.git',
+      remote: { kind: 'https', origin: 'https://gitlab.com' },
+    })
+
+    await expect.element(page.locate('legend').getByText('Backup')).toBeVisible()
+    await expect.element(page.getByText('https://gitlab.com/alex/notes.git')).toBeVisible()
+    await expect
+      .element(page.getByText(/cannot sign in to gitlab\.com over HTTPS yet/))
+      .toBeVisible()
+    await expect.element(page.getByRole('button', { name: 'Stop backing up' })).toBeVisible()
+    await expect
+      .element(page.getByRole('button', { name: 'Sign in to GitHub…' }))
+      .not.toBeInTheDocument()
+  })
+
+  it('names a plain-HTTP remote without its user info and says no sign-in is sent', async () => {
+    await renderSection({
+      phase: 'needsCredential',
+      remoteUrl: 'http://alex:token@gitea.local/alex/notes.git',
+      remote: { kind: 'https', origin: 'http://gitea.local' },
+    })
+
+    await expect.element(page.getByText('http://gitea.local/alex/notes.git')).toBeVisible()
+    await expect.element(page.getByText(/token/)).not.toBeInTheDocument()
+    await expect.element(page.getByText(/never sends a sign-in to gitea\.local/)).toBeVisible()
+  })
+
   it('renders a GitHub remote with the reconnect affordances', async () => {
     await renderSection({
       phase: 'connected',
       remoteUrl: 'https://github.com/alex/notes.git',
-      repo: { owner: 'alex', name: 'notes' },
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      isPrimaryChannel: true,
       status: AUTH_ERROR,
     })
 
@@ -172,7 +227,8 @@ describe('GitSyncSettingsField', () => {
     await renderSection({
       phase: 'connected',
       remoteUrl: 'https://github.com/alex/notes.git',
-      repo: { owner: 'alex', name: 'notes' },
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      isPrimaryChannel: true,
       status: { state: 'idle' },
     })
 
@@ -186,7 +242,8 @@ describe('GitSyncSettingsField', () => {
     await renderSection({
       phase: 'connected',
       remoteUrl: 'https://github.com/alex/notes.git',
-      repo: { owner: 'alex', name: 'notes' },
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      isPrimaryChannel: true,
       status: { state: 'idle' },
     })
 
@@ -206,7 +263,8 @@ describe('GitSyncSettingsField', () => {
     await renderSection({
       phase: 'connected',
       remoteUrl: 'https://github.com/alex/notes.git',
-      repo: { owner: 'alex', name: 'notes' },
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      isPrimaryChannel: true,
       status: { state: 'idle' },
     })
 
@@ -231,7 +289,8 @@ describe('GitSyncSettingsField', () => {
     await renderSection({
       phase: 'connected',
       remoteUrl: 'https://github.com/alex/notes.git',
-      repo: { owner: 'alex', name: 'notes' },
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      isPrimaryChannel: true,
       status: { state: 'idle' },
     })
 
@@ -249,7 +308,8 @@ describe('GitSyncSettingsField', () => {
     await renderSection({
       phase: 'connected',
       remoteUrl: 'https://github.com/alex/notes.git',
-      repo: { owner: 'alex', name: 'notes' },
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      isPrimaryChannel: true,
       status: { state: 'idle' },
     })
 
@@ -274,7 +334,8 @@ describe('GitSyncSettingsField', () => {
     await renderSection({
       phase: 'connected',
       remoteUrl: 'https://github.com/alex/notes.git',
-      repo: { owner: 'alex', name: 'notes' },
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      isPrimaryChannel: true,
       status: { state: 'idle' },
     })
 
@@ -292,7 +353,8 @@ describe('GitSyncSettingsField', () => {
     await renderSection({
       phase: 'connected',
       remoteUrl: 'https://github.com/alex/notes.git',
-      repo: { owner: 'alex', name: 'notes' },
+      remote: { kind: 'github', repo: { owner: 'alex', name: 'notes' } },
+      isPrimaryChannel: true,
       status: { state: 'idle' },
     })
 

@@ -22,7 +22,9 @@ function graphDeps(core: TestCoreServices): GraphServicesDeps {
     gitSync: {
       git: core.gitRepository,
       syncEngines: core.syncEngines,
+      credentials: core.credentials,
       githubAuth: core.githubAuth,
+      hostCredentials: core.hostCredentials,
       githubRepos: core.githubRepos,
       fileChanges,
       indexLifecycle,
