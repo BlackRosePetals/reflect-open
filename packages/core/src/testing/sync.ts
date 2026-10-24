@@ -12,7 +12,11 @@ import type { ClockService } from '../ports/clock-service.ts'
 import type { HttpService } from '../ports/http-service.ts'
 import type { GitSyncService, GitSyncState } from '../sync/git-sync-service.ts'
 import type { ConnectExistingResult, GithubConnector } from '../sync/github-connector.ts'
-import type { ConnectGitHostInput, GitHostConnector } from '../sync/git-host-connector.ts'
+import type {
+  ConnectGitHostInput,
+  GitHostConnector,
+  GitHostSignIn,
+} from '../sync/git-host-connector.ts'
 import type { ICloudSyncService } from '../sync/icloud-sync-service.ts'
 import type { SecretStoreService } from '../secrets/secret-store-service.ts'
 import type {
@@ -615,35 +619,56 @@ export function createTestGithubConnector(): TestGithubConnector {
   return new TestGithubConnectorImpl()
 }
 
+/**
+ * One recorded {@link TestGitHostConnector} action.
+ */
+export type GitHostConnectorCall =
+  | ({ readonly method: 'connectGitHost' } & ConnectGitHostInput)
+  | ({ readonly method: 'updateGitHostSignIn' } & GitHostSignIn)
+
 export interface TestGitHostConnector extends GitHostConnector {
   /**
-   * Every `connectGitHost` input, in order.
+   * Every action called, in order.
    */
-  calls(): readonly ConnectGitHostInput[]
+  calls(): readonly GitHostConnectorCall[]
   /**
    * Answer `connectGitHost`; it resolves by default.
    */
   onConnectGitHost(handler: GitHostConnector['connectGitHost']): void
+  /**
+   * Answer `updateGitHostSignIn`; it resolves by default.
+   */
+  onUpdateGitHostSignIn(handler: GitHostConnector['updateGitHostSignIn']): void
 }
 
 /**
  * A scripted {@link GitHostConnector}: it probes nothing and records every input.
  */
 class TestGitHostConnectorImpl implements TestGitHostConnector {
-  readonly #log: ConnectGitHostInput[] = []
+  readonly #log: GitHostConnectorCall[] = []
   #connect: GitHostConnector['connectGitHost'] = () => Promise.resolve()
+  #update: GitHostConnector['updateGitHostSignIn'] = () => Promise.resolve()
 
   async connectGitHost(input: ConnectGitHostInput): Promise<void> {
-    this.#log.push(input)
+    this.#log.push({ method: 'connectGitHost', ...input })
     await this.#connect(input)
   }
 
-  calls(): readonly ConnectGitHostInput[] {
+  async updateGitHostSignIn(signIn: GitHostSignIn): Promise<void> {
+    this.#log.push({ method: 'updateGitHostSignIn', ...signIn })
+    await this.#update(signIn)
+  }
+
+  calls(): readonly GitHostConnectorCall[] {
     return [...this.#log]
   }
 
   onConnectGitHost(handler: GitHostConnector['connectGitHost']): void {
     this.#connect = handler
+  }
+
+  onUpdateGitHostSignIn(handler: GitHostConnector['updateGitHostSignIn']): void {
+    this.#update = handler
   }
 }
 

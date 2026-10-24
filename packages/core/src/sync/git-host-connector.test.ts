@@ -10,8 +10,11 @@ const GENERATION = 3
 const URL = 'https://gitlab.com/alex/notes.git'
 const INPUT = { remoteUrl: URL, username: 'alex', token: 'glpat-1' }
 
-function setup({ keychainLocked = false } = {}) {
-  const git = createTestGitRepositoryService({ initialized: false, remoteUrl: null })
+function setup({
+  keychainLocked = false,
+  remoteUrl = null,
+}: { keychainLocked?: boolean; remoteUrl?: string | null } = {}) {
+  const git = createTestGitRepositoryService({ initialized: remoteUrl !== null, remoteUrl })
   const secretStore = createTestSecretStoreService()
   const gitHostCredentials = createGitHostCredentialService({
     secretStore: keychainLocked
@@ -92,6 +95,44 @@ describe('GitHostConnector', () => {
     }
     expect(git.calls()).toEqual([])
     expect(secretStore.snapshot()).toEqual({})
+  })
+
+  it('updates the configured remote’s sign-in without touching the remote or the branch', async () => {
+    const { git, secretStore, gitSync, connector } = setup({ remoteUrl: URL })
+    git.onRemoteHead(() => ({ remoteOid: 'a', trackingOid: null, defaultBranch: 'main' }))
+
+    await connector.updateGitHostSignIn({ username: 'alex', token: 'glpat-2' })
+
+    // The probe asks `origin`, not an address a form may have changed.
+    expect(git.calls().map((call) => call.method)).toEqual(['status', 'remoteHead'])
+    expect(git.calls()[1]?.args).toEqual([{ username: 'alex', secret: 'glpat-2' }, GENERATION])
+    expect(secretStore.snapshot()).toEqual({
+      'git-credential:https://gitlab.com': JSON.stringify({ username: 'alex', secret: 'glpat-2' }),
+    })
+    // No `connectRemote`: the stored sign-in restarts the lifecycle by itself.
+    expect(gitSync.calls()).toEqual([])
+  })
+
+  it('stores nothing when the host refuses an updated sign-in', async () => {
+    const { git, secretStore, connector } = setup({ remoteUrl: URL })
+    git.onRemoteHead(() => {
+      throw new AppError('auth', 'the host rejected the stored sign-in')
+    })
+    await expect(
+      connector.updateGitHostSignIn({ username: 'alex', token: 'glpat-1' }),
+    ).rejects.toThrow('rejected')
+    expect(secretStore.snapshot()).toEqual({})
+  })
+
+  it('refuses to update a sign-in for a graph without an https remote', async () => {
+    for (const remoteUrl of [null, 'git@gitlab.com:alex/notes.git', 'http://gitea.local/a/b.git']) {
+      const { git, secretStore, connector } = setup({ remoteUrl })
+      await expect(
+        connector.updateGitHostSignIn({ username: 'alex', token: 'glpat-1' }),
+      ).rejects.toThrow(AppError)
+      expect(git.calls().map((call) => call.method)).toEqual(['status'])
+      expect(secretStore.snapshot()).toEqual({})
+    }
   })
 
   it('connects an empty remote without a branch to align', async () => {
