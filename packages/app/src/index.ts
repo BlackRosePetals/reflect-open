@@ -95,12 +95,10 @@ export {
   type DayWindowRadius,
 } from './daily/day-window.ts'
 export {
-  addMonths,
   buildMonthGrid,
-  monthLabel,
-  monthOf,
-  monthShortLabel,
-  weekdayLabels,
+  formatMonthLabel,
+  formatShortMonthLabel,
+  getWeekdayLabels,
   type MonthGrid,
   type MonthGridCell,
 } from './daily/month-grid.ts'
@@ -111,7 +109,6 @@ export {
   weekAtIndex,
   weekIndexOf,
   weekOf,
-  weekStartOf,
   type WeekWindow,
 } from './daily/week-window.ts'
 export { type Command, type CommandService } from './commands/command-service.ts'

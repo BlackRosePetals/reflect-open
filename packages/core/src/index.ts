@@ -48,8 +48,6 @@ export { type GistPublishService } from './sync/gist-publish-service.ts'
 export { isMobilePlatform, type AppPlatform } from './ports/platform-facts.ts'
 export { createSystemClock, type ClockService, type TimerHandle } from './ports/clock-service.ts'
 export { type IdService } from './ports/id-service.ts'
-export { localIsoDate, parseIsoDate, todayIso } from './lib/dates.ts'
-export { formatDayLabel, formatMonthDay, formatShortDate } from './lib/date-labels.ts'
 export { type BuildPlatform, type PlatformFacts } from './ports/platform-facts.ts'
 export { type FileSrcConverter } from './ports/file-src.ts'
 
@@ -215,7 +213,6 @@ export {
   isNotePath,
   dateFromDailyPath,
   foldGraphPath,
-  isCalendarDate,
 } from './graph/paths.ts'
 export { noteBasenameKey } from './graph/note-reference.ts'
 export {
@@ -259,10 +256,13 @@ export {
   clampSidebarWidth,
   TRANSCRIPTION_PROMPT_MAX_LENGTH,
   normalizeTranscriptionPrompt,
+  TIME_FORMATS,
   timeFormatSchema,
+  DATE_FORMATS,
   dateFormatSchema,
   weekStartDaySchema,
-  weekStartDow,
+  getWeekStartWeekday,
+  getUserWeekStart,
   GRAPH_COLOR_IDS,
   aiProviderIdSchema,
   CHAT_SYSTEM_PROMPT_MAX_LENGTH,
@@ -284,6 +284,15 @@ export {
   type AiPromptMode,
 } from './settings/schema.ts'
 export { type SettingsLoadOutcome, type SettingsService } from './settings/settings-service.ts'
+export {
+  formatDayLabel,
+  formatFullDate,
+  formatMonthDay,
+  formatRecencyLabel,
+  formatShortDate,
+  formatTimeOfDay,
+  type DateTimePrefs,
+} from './lib/date-labels.ts'
 export { type ContactsAuthorization, type ContactMatch } from './contacts/commands.ts'
 export {
   contactsCanLookup,

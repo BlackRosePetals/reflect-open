@@ -1,23 +1,5 @@
 import { useId, useState, type ReactElement, type ReactNode } from 'react'
-import { getMobileSyncStatus, remoteLabel, type MobileSyncDetail } from '@reflect/app'
 import { useQuery } from '@tanstack/react-query'
-import {
-  aiProvider,
-  aiProviderRequiresApiKey,
-  errorMessage,
-  marketingVersion,
-  CHAT_SYSTEM_PROMPT_MAX_LENGTH,
-  TRANSCRIPTION_PROMPT_MAX_LENGTH,
-  normalizeChatSystemPrompt,
-  normalizeTranscriptionPrompt,
-  type AiPrompt,
-  type AiProviderConfig,
-  type DateFormat,
-  type EditorTextSize,
-  type ThemePreference,
-  type TimeFormat,
-  type WeekStartDay,
-} from '@reflect/core'
 import { useAiPrompts } from '@/hooks/use-ai-prompts.ts'
 import { useAiProviders } from '@/hooks/use-ai-providers.ts'
 import { useGithubConnected } from '@/hooks/use-github-connected.ts'
@@ -49,7 +31,25 @@ import { useSubscriptionControls } from '@/mobile/use-subscription-controls.ts'
 import { setPerfHudEnabled, usePerfHudEnabled } from '@/perf-hud/flag.ts'
 import { useGraph } from '@/providers/graph-provider.tsx'
 import { useAppServices, useCoreServices } from '@/services/services-provider.tsx'
-import { formatFullDate } from '@/lib/dates.ts'
+import {
+  aiProvider,
+  aiProviderRequiresApiKey,
+  errorMessage,
+  marketingVersion,
+  CHAT_SYSTEM_PROMPT_MAX_LENGTH,
+  TRANSCRIPTION_PROMPT_MAX_LENGTH,
+  normalizeChatSystemPrompt,
+  normalizeTranscriptionPrompt,
+  type AiPrompt,
+  type AiProviderConfig,
+  type EditorTextSize,
+  type ThemePreference,
+  type TimeFormat,
+  type WeekStartDay,
+  DATE_FORMATS,
+  formatFullDate,
+} from '@reflect/core'
+import { getMobileSyncStatus, remoteLabel, type MobileSyncDetail } from '@reflect/app'
 import { useSettings } from '@/providers/settings-provider.tsx'
 import { CountdownText } from '@/components/countdown-text.tsx'
 import { useGitSyncContext } from '@/providers/sync-provider.tsx'
@@ -74,8 +74,6 @@ const TEXT_SIZE_OPTIONS: readonly SegmentedOption<EditorTextSize>[] = [
   { value: 'medium', label: 'Medium' },
   { value: 'large', label: 'Large' },
 ]
-
-const DATE_FORMATS: readonly DateFormat[] = ['mdy', 'dmy', 'iso']
 
 const WEEK_START_OPTIONS: readonly SegmentedOption<WeekStartDay>[] = [
   { value: 'sunday', label: 'Sunday' },
